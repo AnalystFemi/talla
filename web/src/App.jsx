@@ -108,7 +108,7 @@ function Studio({ go }) {
     try { const out = await fn(); refreshCredits(); return out; }
     catch (e) { setError(e.message); } finally { setBusy(""); }
   }
-  const create = () => run("create", async () => setProject(await api("/api/projects", { method: "POST", body: JSON.stringify(form) })));
+  const create = () => run("create", async () => { setJob(null); setFrames([]); setProject(await api("/api/projects", { method: "POST", body: JSON.stringify(form) })); });
   const stage = (name) => run(name, async () => setProject(await api(`/api/projects/${project.id}/${name}`, { method: "POST", body: JSON.stringify({ storyboard: project.storyboard }) })));
   const generate = () => run("generate", async () => setJob(await api(`/api/projects/${project.id}/generate`, { method: "POST", body: JSON.stringify({ engine }) })));
   const keyframes = () => run("keyframes", async () => {
@@ -121,7 +121,7 @@ function Studio({ go }) {
 
   return (<div className="wrap studio">
     <nav><div className="logo" style={{ cursor: "pointer" }} onClick={() => go("home")}>talla<span>.</span></div>
-      <span className="pill demo">{health ? Object.entries(health.providers).filter(([, v]) => v).length + " providers live" : "connecting…"}</span></nav>
+      <span className="pill demo">{health ? Object.entries(health.providers || {}).filter(([, v]) => v).length + " providers live" : "connecting…"}</span></nav>
     <h2>Studio</h2>
     <p className="sub">Create a project → your Researcher investigates → approve the storyboard → your team films it.</p>
     <div className="crumbs">{crumbs.map((cname, i) => <span key={cname} className={"crumb" + (i <= active ? " on" : "")}>{i + 1}. {cname}</span>)}</div>
@@ -145,6 +145,8 @@ function Studio({ go }) {
         <div><label>Language your customers speak</label>
           <select value={form.language} onChange={(e) => setForm({ ...form, language: e.target.value })}>
             {LANGS.map((l) => <option key={l} value={l}>{l}</option>)}</select></div></div>
+      <label>Who is it for? (audience)</label>
+      <input value={form.audience} onChange={(e) => setForm({ ...form, audience: e.target.value })} placeholder="e.g. Instagram/WhatsApp vendors" />
       <br /><button className="btn accent" disabled={!!busy} onClick={create}>{busy === "create" ? "Creating…" : "Create project"}</button>
     </div>
 
@@ -181,7 +183,7 @@ function Studio({ go }) {
           {project.research && <div className="bubble"><img src="/agents/researcher.webp" alt="" /><div className="msg"><b>Researcher</b>
             Found {project.research.pain_points?.length || 0} pain points. Top hook: “{project.research.hooks?.[0] || "—"}”</div></div>}
           {project.storyboard && <div className="bubble"><img src="/agents/scriptwriter.webp" alt="" /><div className="msg"><b>Scriptwriter</b>
-            Storyboard ready — {project.storyboard.scenes.length} scenes, about {project.storyboard.scenes.reduce((a, s) => a + (s.seconds || 0), 0)} seconds. Review it below before we film.</div></div>}
+            Storyboard ready — {project.storyboard.scenes.length} scenes, about {project.storyboard.scenes.reduce((a, s) => a + (s.seconds || 0), 0)} seconds. Review it above before we film.</div></div>}
           {project.script && <div className="bubble"><img src="/agents/voice.webp" alt="" /><div className="msg"><b>Voice</b>
             Script written in {project.script.language}. I will speak it with open Nigerian TTS on Modal.</div></div>}
           {frames.length > 0 && <div className="bubble"><img src="/agents/editor.webp" alt="" /><div className="msg"><b>Editor</b>

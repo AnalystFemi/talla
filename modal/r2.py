@@ -5,6 +5,10 @@ import boto3
 
 
 def upload_to_r2(local_path: str, key: str, content_type: str = "video/mp4") -> str:
+    # Until R2 S3 keys exist as a Modal secret, keep outputs in the Modal
+    # volume and say so honestly instead of failing after a GPU render.
+    if not os.environ.get("R2_ACCOUNT_ID"):
+        return f"modal-volume://talla-outputs/{key}"
     account = os.environ["R2_ACCOUNT_ID"]
     s3 = boto3.client(
         "s3",

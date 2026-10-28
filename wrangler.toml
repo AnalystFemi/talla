@@ -5,7 +5,7 @@ compatibility_date = "2026-10-28"
 [[d1_databases]]
 binding = "DB"
 database_name = "talla"
-database_id = "REPLACE_AFTER_WRANGLER_D1_CREATE"
+database_id = "14e2db4e-d6a4-4111-8e45-662df9267afd"
 
 [[r2_buckets]]
 binding = "MEDIA"

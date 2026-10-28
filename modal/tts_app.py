@@ -1,6 +1,13 @@
-"""Nigerian TTS — SoroTTS / WazobiaVoice, open weights on Modal (brief SS4).
-Priority 1. YarnGPT is API-only fallback and is NOT used unless these fail.
-Weights download once into a Modal volume (cloud only, >5MB rule)."""
+"""Nigerian TTS on Modal (brief SS4) — verified models, per-language.
+
+Verified 2026-10-28 (HF): the brief's SoroTTS (Orpheus LoRA) and WazobiaVoice
+(gated Chatterbox) are NOT transformers-pipeline compatible. The verified
+drop-in path is Meta MMS VITS per language (~40M params — runs on CPU, no GPU
+queue, near-zero cost). NOTE: MMS/Soro licences are CC-BY-NC — fine for the
+hackathon demo; commercial use needs a licence or a commercial TTS (see
+CREDITS.md). Soro Orpheus / Wazobia remain opt-in engines for a later
+natural-voice upgrade with custom loaders.
+"""
 import os
 import modal
 
@@ -8,10 +15,13 @@ app = modal.App("talla-tts")
 weights = modal.Volume.from_name("talla-tts-weights", create_if_missing=True)
 outputs = modal.Volume.from_name("talla-outputs", create_if_missing=True)
 
-# Confirm exact HF repo IDs at deploy time (see CREDITS.md checklist):
 TTS_MODELS = {
-    "soro": os.environ.get("SORO_TTS_MODEL", "Shinzmann/SoroTTS"),
-    "wazobia": os.environ.get("WAZOBIA_MODEL", "Axiveri/WazobiaVoice"),
+    "pidgin": os.environ.get("TTS_PIDGIN", "facebook/mms-tts-pcm"),
+    "yoruba": os.environ.get("TTS_YORUBA", "facebook/mms-tts-yor"),
+    "hausa": os.environ.get("TTS_HAUSA", "facebook/mms-tts-hau"),
+    "igbo": os.environ.get("TTS_IGBO", "Shinzmann/soro-tts-ibo"),
+    "nigerian-english": os.environ.get("TTS_ENGLISH", "facebook/mms-tts-eng"),
+    "english": os.environ.get("TTS_ENGLISH", "facebook/mms-tts-eng"),
 }
 
 image = (
@@ -25,31 +35,33 @@ image = (
 
 
 @app.cls(image=image, volumes={"/weights": weights, "/outputs": outputs},
-         gpu="L4", timeout=600, scaledown_window=60)
+         timeout=600, scaledown_window=30)  # CPU: tiny VITS models, no GPU queue
 class NigerianTTS:
     @modal.enter()
     def load(self):
-        # Lazy per-engine load kept in speak(); enter() just warms the volume.
         self._pipes = {}
 
-    def _pipe(self, engine: str):
-        if engine not in self._pipes:
+    def _pipe(self, language: str):
+        if language not in self._pipes:
             from transformers import pipeline
-            self._pipes[engine] = pipeline("text-to-speech", model=TTS_MODELS[engine], device="cuda")
-        return self._pipes[engine]
+            self._pipes[language] = pipeline("text-to-speech", model=TTS_MODELS[language])
+        return self._pipes[language]
 
     @modal.method()
     def speak(self, payload: dict) -> dict:
-        """payload: {text, language, engine?} -> {audio_url, engine}"""
+        """payload: {text, language} -> {audio_url, engine, language, mode}"""
         import time, soundfile as sf
         from r2 import upload_to_r2
-        engine = payload.get("engine", "soro")
-        out = self._pipe(engine)(payload["text"])
+        language = (payload.get("language") or "pidgin").lower()
+        if language not in TTS_MODELS:
+            return {"error": f"Unsupported language: {language}", "mode": "error"}
+        out = self._pipe(language)(payload["text"])
         path = f"/outputs/tts_{int(time.time())}.wav"
         sf.write(path, out["audio"], out["sampling_rate"])
         url = upload_to_r2(path, f"audio/tts_{int(time.time())}.wav", "audio/wav")
         outputs.commit()
-        return {"audio_url": url, "engine": engine, "language": payload.get("language"), "mode": "live"}
+        return {"audio_url": url, "engine": f"mms:{TTS_MODELS[language]}",
+                "language": language, "mode": "live"}
 
 
 @app.local_entrypoint()
