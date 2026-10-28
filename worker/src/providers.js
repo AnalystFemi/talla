@@ -9,15 +9,20 @@ export async function basetenChat(env, messages, { json = true } = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.BASETEN_API_KEY}` },
     body: JSON.stringify({
-      model: env.BASETEN_MODEL || "meta/muse-spark-open",
-      messages, temperature: 0.7,
+      model: env.BASETEN_MODEL || "meta-models/muse-spark-open-1026",
+      messages, temperature: 0.7, max_tokens: 2500,
       ...(json ? { response_format: { type: "json_object" } } : {}),
     }),
   });
   if (!res.ok) throw new Error(`Baseten ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || "{}";
-  return json ? JSON.parse(text) : text;
+  const msg = data.choices?.[0]?.message || {};
+  const text = msg.content || msg.reasoning_content || "{}";
+  if (!json) return text;
+  // Models often fence JSON in ```json blocks — strip before parsing.
+  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const start = cleaned.indexOf("{"), end = cleaned.lastIndexOf("}");
+  return JSON.parse(start >= 0 ? cleaned.slice(start, end + 1) : cleaned);
 }
 
 export async function firecrawlScrape(env, url) {
@@ -40,6 +45,24 @@ export async function exaSearch(env, query) {
   if (!res.ok) throw new Error(`Exa ${res.status}`);
   const data = await res.json();
   return (data.results || []).map((r) => ({ title: r.title, url: r.url, text: (r.text || "").slice(0, 800) }));
+}
+
+/** Muse Image 1.0 via Meta Model API (OpenAI-compatible). $0.01/image. */
+export async function museImage(env, prompt, { size = "1024x1536" } = {}) {
+  const base = (env.META_BASE_URL || "https://api.meta.ai/v1").replace(/\/$/, "");
+  const res = await fetch(`${base}/images/generations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.META_API_KEY}` },
+    body: JSON.stringify({
+      model: env.MUSE_IMAGE_MODEL || "muse-image-1.0", prompt, n: 1, size,
+      reasoning_strength: "low",
+      tool_enablement: { enable_web_search: false, enable_image_search: false, enable_shell: false },
+    }),
+  });
+  if (!res.ok) throw new Error(`Muse Image ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  const item = data.data?.[0] || {};
+  return item.b64_json ? `data:image/webp;base64,${item.b64_json}` : item.url;
 }
 
 /** Ask a Modal web endpoint to do GPU work; returns parsed JSON. */

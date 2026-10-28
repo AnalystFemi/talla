@@ -6,3 +6,7 @@ data/*.json
 __pycache__/
 *.mp4
 !web/public/.gitkeep
+
+data/*.webp
+data/*.wav
+data/*.mp4

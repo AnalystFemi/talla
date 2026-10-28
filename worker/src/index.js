@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { researchAgent, storyboardAgent, scriptAgent, criticAgent, LANGUAGES } from "./agents.js";
-import { creditSummary, LIMITS } from "./credits.js";
-import { has, modalCall } from "./providers.js";
+import { creditSummary, LIMITS, charge, cacheGet, cacheSet, cacheKey, assertBudget } from "./credits.js";
+import { has, modalCall, museImage } from "./providers.js";
 
 const app = new Hono();
 app.use("*", cors());
@@ -56,7 +56,8 @@ async function stage(c, name, fn, status) {
   if (name === "script" && !p.storyboard) return c.json({ error: "Run storyboard first" }, 400);
   const body = name === "storyboard" ? await c.req.json().catch(() => ({})) : {};
   if (body.storyboard) p.storyboard = body.storyboard; // user edits from the studio
-  p[name] = await fn(c.env, p);
+  try { p[name] = await fn(c.env, p); }
+  catch (e) { console.error(`[${name}]`, e); return c.json({ error: `${name} failed: ${e.message}` }, 502); }
   p.status = status;
   await saveProject(c.env, p);
   return c.json(p);
@@ -100,6 +101,35 @@ app.post("/api/projects/:pid/generate", async (c) => {
     : "Demo mode: connect MODAL_VIDEO_ENDPOINT (H3 primary) to render real clips. No credits were spent.";
   p.status = "generated"; await saveProject(c.env, p);
   return c.json(job, 201);
+});
+
+// Keyframes: one Muse Image still per storyboard scene (brief SS6).
+// Cached — regenerating the same scene prompt costs $0.
+app.post("/api/projects/:pid/keyframes", async (c) => {
+  const p = await getProject(c.env, c.req.param("pid"));
+  if (!p) return c.json({ error: "Project not found" }, 404);
+  if (!p.storyboard) return c.json({ error: "Run storyboard first" }, 400);
+  if (!has(c.env, "META_API_KEY")) return c.json({ error: "META_API_KEY not set" }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const scenes = p.storyboard.scenes.filter((s) => !body.scene || s.n === body.scene);
+  const frames = [];
+  try {
+    for (const s of scenes) {
+      const prompt = `Raw candid iPhone selfie photo, Nigerian UGC creator, visible skin pores, natural imperfections, natural light. ${s.visual}. Product: ${p.name} — ${p.description}. Shot: ${s.shot}. NOT plastic skin, NOT airbrushed, NOT CGI, no beauty filter, vertical 9:16.`;
+      const key = cacheKey("keyframe", prompt);
+      let url = cacheGet(key);
+      if (url) { await charge(c.env, "meta", "muse_image", p.id, { cached: true }); }
+      else {
+        assertBudget("meta");
+        url = await museImage(c.env, prompt);
+        cacheSet(key, url);
+        await charge(c.env, "meta", "muse_image", p.id);
+      }
+      frames.push({ scene: s.n, keyframe_url: url });
+    }
+  } catch (e) { return c.json({ error: `keyframes failed: ${e.message}` }, 502); }
+  p.keyframes = frames; await saveProject(c.env, p);
+  return c.json({ project_id: p.id, keyframes: frames });
 });
 
 app.get("/api/jobs/:jid", (c) => {

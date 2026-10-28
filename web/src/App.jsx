@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 
 const API = "";
 const AGENTS = [
-  { key: "researcher", name: "Researcher", img: "/agents/researcher.jpg", color: "Blue", job: "Analyses trends, competitors and what Nigerian buyers actually want" },
-  { key: "scriptwriter", name: "Scriptwriter", img: "/agents/scriptwriter.jpg", color: "Orange", job: "Writes hooks and scripts in Pidgin, Yoruba, Hausa, Igbo & Nigerian English" },
-  { key: "voice", name: "Voice", img: "/agents/voice.jpg", color: "Pink", job: "Speaks your script with open Nigerian TTS — SoroTTS / WazobiaVoice on Modal" },
-  { key: "critic", name: "Critic", img: "/agents/critic.jpg", color: "Green", job: "Quality gate — rejects plastic skin, bad lip-sync and unnatural speech" },
-  { key: "editor", name: "Editor", img: "/agents/editor.jpg", color: "Purple", job: "Stitches clips, burns captions, adds the AI-generated label, final polish" },
+  { key: "researcher", name: "Researcher", img: "/agents/researcher.webp", color: "Blue", job: "Analyses trends, competitors and what Nigerian buyers actually want" },
+  { key: "scriptwriter", name: "Scriptwriter", img: "/agents/scriptwriter.webp", color: "Orange", job: "Writes hooks and scripts in Pidgin, Yoruba, Hausa, Igbo & Nigerian English" },
+  { key: "voice", name: "Voice", img: "/agents/voice.webp", color: "Pink", job: "Speaks your script with open Nigerian TTS — SoroTTS / WazobiaVoice on Modal" },
+  { key: "critic", name: "Critic", img: "/agents/critic.webp", color: "Green", job: "Quality gate — rejects plastic skin, bad lip-sync and unnatural speech" },
+  { key: "editor", name: "Editor", img: "/agents/editor.webp", color: "Purple", job: "Stitches clips, burns captions, adds the AI-generated label, final polish" },
 ];
 const PIPELINE = [
   ["Research", "Pain points, hooks, formats, language"], ["Storyboard", "3–7 scenes you review & edit"],
@@ -31,14 +31,31 @@ function Home({ go }) {
         <button className="btn small" onClick={() => go("studio")}>Start creating</button></div></nav>
       <div className="hero">
         <span className="badge">Built for Nigerian businesses & creators</span>
-        <h1>Your product, <img className="agent-inline" src="/agents/researcher.jpg" alt="Researcher" /> researched,<br />
-          storyboarded <img className="agent-inline" src="/agents/scriptwriter.jpg" alt="Scriptwriter" /> and filmed<br />
-          by your AI <img className="agent-inline" src="/agents/voice.jpg" alt="Voice" /> UGC team</h1>
+        <h1>Your product, <img className="agent-inline" src="/agents/researcher.webp" alt="Researcher" /> researched,<br />
+          storyboarded <img className="agent-inline" src="/agents/scriptwriter.webp" alt="Scriptwriter" /> and filmed<br />
+          by your AI <img className="agent-inline" src="/agents/voice.webp" alt="Voice" /> UGC team</h1>
         <p>Talla turns a product, brand or category into a high-converting UGC video — in Pidgin, Yoruba, Hausa, Igbo and Nigerian English. No creator fees. No filming. No editing.</p>
         <button className="btn accent" onClick={() => go("studio")}>Create my first video</button>{" "}
         <button className="btn ghost" onClick={() => document.getElementById("team").scrollIntoView({ behavior: "smooth" })}>Meet the team</button>
-        <img className="team-hero" src="/agents/team.jpg" alt="The Talla agent team" />
+        <img className="team-hero reveal" src="/agents/team.webp" alt="The Talla agent team" />
+        <div className="marquee"><div className="marquee-track">
+          {[...AGENTS, ...AGENTS].map((a, i) => (
+            <span className="chip" key={i}><img src={a.img} alt="" />{a.name} · {a.color} team</span>))}
+        </div></div>
       </div>
+
+      <section><h2>Your team&apos;s already on it</h2>
+        <p className="sub">They don&apos;t wait to be asked. Describe your product and they come back with research, a storyboard and a film plan.</p>
+        <div className="chat">
+          <div className="bubble"><img src="/agents/researcher.webp" alt="" /><div className="msg"><b>Researcher</b>
+            I checked your market. Buyers fear fake alerts, so verse two must show the QR proof close-up.</div></div>
+          <div className="bubble"><img src="/agents/scriptwriter.webp" alt="" /><div className="msg"><b>Scriptwriter</b>
+            Hook written in Pidgin: “Stop losing customers because your receipt no look serious.”</div></div>
+          <div className="bubble"><img src="/agents/critic.webp" alt="" /><div className="msg"><b>Critic</b>
+            Rejected take 1 — skin looked plastic. Regenerating with natural light, pores visible.</div></div>
+          <div className="bubble"><img src="/agents/editor.webp" alt="" /><div className="msg"><b>Editor</b>
+            <span className="dots"><span></span><span></span><span></span></span> Stitching your 5 scenes with captions…</div></div>
+        </div></section>
 
       <section id="team"><h2>Meet your team</h2>
         <p className="sub">Five specialists that hand work to each other — like a Riverside studio crew, but for UGC adverts. Talla means “advertisement” in Hausa.</p>
@@ -65,6 +82,7 @@ function Home({ go }) {
         <p>Describe what you sell. Your team handles research, script, voice and film.</p>
         <button className="btn accent" onClick={() => go("studio")}>Start creating — it&apos;s free to try</button></div>
 
+      <div className="wordmark">ta<img src="/agents/voice.webp" alt="" />lla</div>
       <footer><span>© 2026 Talla — AI-generated content, always labelled.</span>
         <span>Research in detail. Film in your language.</span></footer>
     </div>
@@ -75,6 +93,7 @@ function Studio({ go }) {
   const [form, setForm] = useState({ name: "", description: "", url: "", category: "", audience: "", language: "pidgin" });
   const [project, setProject] = useState(null);
   const [job, setJob] = useState(null);
+  const [frames, setFrames] = useState([]);
   const [engine, setEngine] = useState("h3");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -92,6 +111,10 @@ function Studio({ go }) {
   const create = () => run("create", async () => setProject(await api("/api/projects", { method: "POST", body: JSON.stringify(form) })));
   const stage = (name) => run(name, async () => setProject(await api(`/api/projects/${project.id}/${name}`, { method: "POST", body: JSON.stringify({ storyboard: project.storyboard }) })));
   const generate = () => run("generate", async () => setJob(await api(`/api/projects/${project.id}/generate`, { method: "POST", body: JSON.stringify({ engine }) })));
+  const keyframes = () => run("keyframes", async () => {
+    const out = await api(`/api/projects/${project.id}/keyframes`, { method: "POST", body: JSON.stringify({}) });
+    setFrames(out.keyframes || []);
+  });
 
   const crumbs = ["Product", "Research", "Storyboard", "Script", "Generate"];
   const active = !project ? 0 : job ? 4 : project.script ? 3 : project.storyboard ? 2 : project.research ? 1 : 0;
@@ -128,7 +151,7 @@ function Studio({ go }) {
     {project && <>
       <div className="panel"><h3>2. Research brief</h3>
         <div className="agents-row"><span className={"agent-chip" + (busy === "research" ? " working" : "")}>
-          <img src="/agents/researcher.jpg" alt="" /> Researcher {project.research?.mode === "demo" && <span className="pill demo">demo</span>}</span></div>
+          <img src="/agents/researcher.webp" alt="" /> Researcher {project.research?.mode === "demo" && <span className="pill demo">demo</span>}</span></div>
         {!project.research
           ? <button className="btn" disabled={!!busy} onClick={() => stage("research")}>{busy === "research" ? "Researching…" : "Run research"}</button>
           : <pre>{JSON.stringify(project.research, null, 2)}</pre>}
@@ -146,12 +169,27 @@ function Studio({ go }) {
 
       {project.storyboard && <div className="panel"><h3>4. Script in {project.language}</h3>
         <div className="agents-row"><span className={"agent-chip" + (busy === "script" ? " working" : "")}>
-          <img src="/agents/scriptwriter.jpg" alt="" /> Scriptwriter</span>
-          <span className="agent-chip"><img src="/agents/voice.jpg" alt="" /> Voice (Modal TTS)</span></div>
+          <img src="/agents/scriptwriter.webp" alt="" /> Scriptwriter</span>
+          <span className="agent-chip"><img src="/agents/voice.webp" alt="" /> Voice (Modal TTS)</span></div>
         {!project.script
           ? <button className="btn" disabled={!!busy} onClick={() => stage("script")}>{busy === "script" ? "Writing…" : "Write script"}</button>
           : <pre>{JSON.stringify(project.script, null, 2)}</pre>}
       </div>}
+
+      {project && <div className="panel"><h3>Team activity</h3>
+        <div>
+          {project.research && <div className="bubble"><img src="/agents/researcher.webp" alt="" /><div className="msg"><b>Researcher</b>
+            Found {project.research.pain_points?.length || 0} pain points. Top hook: “{project.research.hooks?.[0] || "—"}”</div></div>}
+          {project.storyboard && <div className="bubble"><img src="/agents/scriptwriter.webp" alt="" /><div className="msg"><b>Scriptwriter</b>
+            Storyboard ready — {project.storyboard.scenes.length} scenes, about {project.storyboard.scenes.reduce((a, s) => a + (s.seconds || 0), 0)} seconds. Review it below before we film.</div></div>}
+          {project.script && <div className="bubble"><img src="/agents/voice.webp" alt="" /><div className="msg"><b>Voice</b>
+            Script written in {project.script.language}. I will speak it with open Nigerian TTS on Modal.</div></div>}
+          {frames.length > 0 && <div className="bubble"><img src="/agents/editor.webp" alt="" /><div className="msg"><b>Editor</b>
+            {frames.length} keyframe{frames.length > 1 ? "s" : ""} generated with Muse Image. Ready to animate.</div></div>}
+          {job && <div className="bubble"><img src="/agents/critic.webp" alt="" /><div className="msg"><b>Critic</b>
+            Checked {job.scenes?.length || 0} scenes on the {job.engine} engine. Verdicts are listed below — nothing plastic passed me.</div></div>}
+          {!project.research && <p className="hint">Your team is waiting. Run research and their updates will appear here.</p>}
+        </div></div>}
 
       {project.script && <div className="panel"><h3>5. Film it</h3>
         <div className="agents-row">{AGENTS.map((a) => (
@@ -164,7 +202,12 @@ function Studio({ go }) {
           <option value="ltx">LTX — fallback (Modal)</option>
         </select>
         <br /><br />
-        <button className="btn accent" disabled={!!busy} onClick={generate}>{busy === "generate" ? "Your team is filming…" : "Generate video"}</button>
+        <button className="btn" disabled={!!busy} onClick={keyframes}>{busy === "keyframes" ? "Generating keyframes…" : "1. Generate keyframes (Muse Image)"}</button>{" "}
+        <button className="btn accent" disabled={!!busy} onClick={generate}>{busy === "generate" ? "Your team is filming…" : "2. Generate video"}</button>
+        {frames.length > 0 && <div>{frames.map((f) => (
+          <div className="scene" key={f.scene}><b>Scene {f.scene} keyframe</b>
+            <img className="keyframe" src={f.keyframe_url} alt={`Scene ${f.scene} keyframe`} /></div>))}
+        </div>}
         {job && <><br /><br />
           <span className="pill pass">Job {job.id} — {job.status} ({job.progress}%)</span>{" "}
           <span className="pill demo">engine: {job.engine}</span>
@@ -184,3 +227,4 @@ export default function App() {
   const [view, setView] = useState("home");
   return view === "home" ? <Home go={setView} /> : <Studio go={setView} />;
 }
+

@@ -2,12 +2,14 @@
 // Rules: Baseten first for LLM work; Meta credits only for Muse Image + final
 // high-stakes calls; cache everything; critic retries capped; 768p first.
 
+// Hard caps set by the user: $50 TOTAL for the whole project.
+// (The hackathon issued more credit than this; we deliberately spend $50 max.)
+export const TOTAL_BUDGET_USD = 50;
 export const BUDGETS_USD = {
-  baseten: 100,   // confirmed $100, Muse Spark Open
-  meta: 150,      // confirmed $150, preserve for Muse Image + final passes
-  modal: 30,      // assumed free-tier/recurring — CONFIRM actual Modal credit
-  firecrawl: 10,
-  exa: 10,
+  baseten: 20,    // Muse Spark Open: research, storyboard, script, critic
+  meta: 15,       // Muse Image keyframes + character regeneration + finals
+  modal: 10,      // GPU media — H3 cold starts are the risk; see CREDITS.md
+  firecrawl: 5,   // research enrichment (Exa skipped — key pending)
 };
 
 // Estimated cost per operation (USD). Update with real provider pricing.
@@ -35,7 +37,9 @@ export function cacheGet(key) { return cache.get(key); }
 export function cacheSet(key, value) { cache.set(key, value); return value; }
 
 export async function charge(env, provider, operation, projectId, { cached = false } = {}) {
-  const estimated = cached ? 0 : (COSTS_USD[`${provider}:${operation}`] ?? 0);
+  // Firecrawl + Exa share the single $5 "research" cap (BUDGETS.firecrawl).
+  if (provider === "exa") provider = "firecrawl";
+  const estimated = cached ? 0 : (COSTS_USD[`${provider}:${operation}`] ?? COSTS_USD[`exa:${operation}`] ?? 0);
   const entry = { provider, operation, estimated_usd: estimated, project_id: projectId || null, cached: cached ? 1 : 0 };
   log.push(entry);
   if (env?.DB) {
@@ -51,18 +55,28 @@ export async function charge(env, provider, operation, projectId, { cached = fal
 export function creditSummary() {
   const spent = {};
   for (const e of log) spent[e.provider] = (spent[e.provider] || 0) + e.estimated_usd;
-  const providers = Object.entries(BUDGETS_USD).map(([provider, budget]) => {
+  // Union of capped providers + anything actually spent (e.g. a late Exa key)
+  // so the $50 global total can never be under-counted.
+  const allProviders = { ...BUDGETS_USD };
+  for (const k of Object.keys(spent)) if (!(k in allProviders)) allProviders[k] = 0;
+  const providers = Object.entries(allProviders).map(([provider, budget]) => {
     const used = +(spent[provider] || 0).toFixed(4);
     return { provider, budget_usd: budget, estimated_used_usd: used,
       remaining_usd: +(budget - used).toFixed(4), pct_used: budget ? Math.round((used / budget) * 100) : 0,
       warning: used >= budget * LIMITS.softCapPct };
   });
-  return { providers, limits: LIMITS, calls_logged: log.length };
+  const totalUsed = +providers.reduce((a, p) => a + p.estimated_used_usd, 0).toFixed(4);
+  return { providers, limits: LIMITS, calls_logged: log.length,
+    total: { budget_usd: TOTAL_BUDGET_USD, estimated_used_usd: totalUsed,
+      remaining_usd: +(TOTAL_BUDGET_USD - totalUsed).toFixed(4),
+      warning: totalUsed >= TOTAL_BUDGET_USD * LIMITS.softCapPct } };
 }
 
-/** Hard guard: throws when a provider budget is exhausted. */
+/** Hard guard: throws when a provider OR the $50 global budget is exhausted. */
 export function assertBudget(provider) {
-  const s = creditSummary().providers.find((p) => p.provider === provider);
+  const summary = creditSummary();
+  if (summary.total.remaining_usd <= 0) throw new Error(`BUDGET_EXHAUSTED:total_$50`);
+  const s = summary.providers.find((p) => p.provider === provider);
   if (s && s.remaining_usd <= 0) throw new Error(`BUDGET_EXHAUSTED:${provider}`);
   return s;
 }
