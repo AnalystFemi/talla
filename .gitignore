@@ -1,0 +1,8 @@
+.env
+node_modules/
+dist/
+data/*.json
+.wrangler/
+__pycache__/
+*.mp4
+!web/public/.gitkeep

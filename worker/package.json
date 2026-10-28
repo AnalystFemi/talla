@@ -1,0 +1,18 @@
+{
+  "name": "talla-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=../.env src/local.js",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute talla --local --file=../infra/schema.sql",
+    "db:remote": "wrangler d1 execute talla --remote --file=../infra/schema.sql"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

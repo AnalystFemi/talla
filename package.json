@@ -1,0 +1,13 @@
+{
+  "name": "talla",
+  "private": true,
+  "scripts": {
+    "install:all": "npm --prefix web install && npm --prefix worker install",
+    "dev:api": "npm --prefix worker run dev",
+    "dev:web": "npm --prefix web run dev",
+    "build:web": "npm --prefix web run build",
+    "smoke": "node scripts/smoke.mjs",
+    "deploy:api": "npm --prefix worker run deploy",
+    "deploy:web": "npm --prefix web run build && wrangler pages deploy web/dist --project-name talla"
+  }
+}
