@@ -96,6 +96,50 @@ export async function museTranscribe(env, wavB64, { language } = {}) {
   return { text, words: Array.isArray(words) ? words : null };
 }
 
+/** SAM 3.1 via Meta Model API Responses — QC / segmentation stage.
+ *  One short noun phrase per call ("person", "phone"); returns bounding
+ *  boxes with confidences. Docs: dev.meta.ai/docs/sam/overview — model
+ *  sam-3.1 over POST /v1/responses, same Bearer key as the rest of the API.
+ *  NON-STREAMING probe: we tolerate the response shape and only count
+ *  detections from the output_text lane. Never throws into generation. */
+export async function samSegment(env, imageDataUrl, phrase) {
+  const base = (env.META_BASE_URL || "https://api.meta.ai/v1").replace(/\/$/, "");
+  // NOTE: no include_confidence — live probe 2026-10-29: this deploy rejects
+  // it ("unknown parameter"), despite the docs marking it optional.
+  const body = {
+    model: env.SAM_MODEL || "sam-3.1",
+    input: [{ type: "message", role: "user", content: [
+      { type: "input_text", text: phrase },
+      { type: "input_image", image_url: imageDataUrl },
+    ] }],
+  };
+  const res = await fetch(`${base}/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.META_API_KEY}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`SAM ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const data = await res.json();
+  AC_SAM_COUNT += 1;
+  // Responses API: output[].content[] with type output_text; tolerate the
+  // shorthand output_text lane too.
+  let text = "";
+  for (const item of data.output || []) {
+    for (const part of item.content || []) {
+      if ((part.type === "output_text" || part.type === "text") && typeof part.text === "string") text += part.text;
+    }
+  }
+  if (typeof data.output_text === "string") text += data.output_text;
+  // Each detection record pairs one <|box;...|> token; count = detections.
+  const boxes = [...text.matchAll(/<\|box;x1=(\d+);y1=(\d+);x2=(\d+);y2=(\d+);w=(\d+);h=(\d+)(?:;c=([\d.]+))?\|>/g)]
+    .map((m) => ({ x1: +m[1], y1: +m[2], x2: +m[3], y2: +m[4], frame_w: +m[5], frame_h: +m[6],
+      confidence: m[7] ? Number(m[7]) : null }));
+  return { phrase, detections: boxes.length, boxes, raw_len: text.length };
+}
+
+let AC_SAM_COUNT = 0;
+export function samCallCount() { return AC_SAM_COUNT; }
+
 /** Muse Image 1.0 via Meta Model API (OpenAI-compatible). $0.01/image. */
 export async function museImage(env, prompt, { size = "1024x1536" } = {}) {
   const base = (env.META_BASE_URL || "https://api.meta.ai/v1").replace(/\/$/, "");

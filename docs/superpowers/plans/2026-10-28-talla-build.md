@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build Talla — a generic Nigerian UGC video engine (product/URL/category → research → storyboard → script → keyframe → voice → lip-sync/video → critic → stitched 25–40s video) with a Riverside-style homepage + studio, Cloudflare-hosted, Modal GPU media, Baseten Muse Spark brain. rcpt is the final test case only.
+**Goal:** Build Talla — a generic Nigerian UGC video engine (product/URL/category → research → storyboard → script → keyframe → SAM 3.1 QC → YarnGPT2/MMS voice → Wan 2.2/LTX silent-motion video → critic → ffmpeg stitch → Muse Voice Transcribe verify → Export for Posting) with a Riverside-style homepage + studio, Cloudflare-hosted, Modal GPU media, Baseten Muse Spark Open brain. rcpt is the final test case only. MiniMax H3 is parked/ON HOLD (its H200 calibration run was cancelled at the user's 18:35 hard stop 2026-10-29; /generate never submits it — Wan 2.2 is primary, LTX the cheapest fallback).
 
-**Architecture:** React/Vite SPA (Cloudflare Pages) → Hono Worker API (D1 projects/jobs/credits, R2 media) → Baseten Muse Spark Open (agents/critic), Meta Muse Image (keyframes), Modal (H3 primary, LivePortrait/Wan 2.2/LTX secondary, SoroTTS/Wazobia TTS, FFmpeg stitch). No-login; projects addressed by ID. Credit manager enforces budgets, caching, retry caps, 768p-first generation. Nothing >5MB is downloaded/rendered locally; weights live in Modal volumes, outputs in R2.
+**Architecture:** React/Vite SPA (Cloudflare Pages) → Hono Worker API (D1 projects/jobs/credits, R2 media) → Baseten Muse Spark Open (agents/critic), Meta Muse Image (keyframes), Meta SAM 3.1 (keyframe QC), Modal (Wan 2.2 primary + LTX cheapest silent motion, YarnGPT2/MMS voices, FFmpeg stitch composite; H3 parked, lipsync_app.py unused). No-login; projects addressed by ID. Credit manager enforces budgets, caching, retry caps, 768p-first generation. Nothing >5MB is downloaded/rendered locally; weights live in Modal volumes, outputs in R2.
 
 **Tech Stack:** React + Vite, Hono (Worker + @hono/node-server locally), Cloudflare Pages/Workers/D1/R2, Modal (Python), FFmpeg.
 
@@ -35,8 +35,8 @@
 - [ ] Verify: `npm run build` succeeds; dev server renders
 
 ### Task 5: Modal media apps (cloud-only heavy work)
-**Files:** `modal/h3_app.py`, `modal/lipsync_app.py`, `modal/wan_app.py`, `modal/tts_app.py`, `modal/stitch_app.py`
-- [ ] H3 primary (diffusers, multi-GPU class), LivePortrait + Wan 2.2 + LTX secondary, SoroTTS/Wazobia TTS, FFmpeg stitch+captions+"AI-generated" label; all outputs uploaded to R2 from Modal
+**Files:** `modal/wan_app.py`, `modal/yarngpt_app.py`, `modal/tts_app.py`, `modal/stitch_app.py`, `modal/h3_app.py` (parked), `modal/lipsync_app.py` (parked, unused)
+- [ ] Wan 2.2 primary + LTX cheapest (silent motion), YarnGPT2 (Yoruba/Hausa/Igbo) + MMS (Pidgin) voices, FFmpeg stitch+captions+"AI-generated" label; all outputs uploaded to R2 from Modal. H3 parked — not deployed, never submitted by /generate.
 - [ ] Verify: `python -m py_compile modal/*.py`
 
 ### Task 6: Local run + smoke test
@@ -46,5 +46,12 @@
 
 ### Task 7: Credit management + handover
 **Files:** `CREDITS.md`, `README.md`
-- [ ] Document budgets ($100 Baseten / $150 Meta / Modal), burn rules, what each key unlocks, keys the user must supply
+- [ ] Document budgets — see `worker/src/credits.js` BUDGETS_USD ($20 Baseten / $15 Meta / $10 Modal / $5 research, $50 total cap) — burn rules, what each key unlocks, keys the user must supply
 - [ ] Verify: `/api/credits` shows budget vs estimated burn
+
+### Task 8: Post-plan hardening (2026-10-29)
+- [x] Export for Posting (Muse Spark caption in video language + 5-8 hashtags; no social APIs)
+- [x] Avatar approval gate (UGC Forge): Funmi v4 LOCKED by user (light-skinned Yoruba woman, black knotless braids, upscale Lagos flat). H200 calibration run CANCELLED 2026-10-29 at user hard stop (18:35): no video produced, H3 parked/ON HOLD permanently; talking-head engine decision pending (open-source LatentSync/MuseTalk bake-off)
+- [x] SAM 3.1 (Meta) keyframe QC gate — live-verified (person:1 on Funmi v4); Wan 2.2 primary video engine, LTX cheapest, H3 parked
+- [ ] Two male avatars: Tunde (light-skinned) generated OK; Ebuka (dark-skinned) rendered female → REJECTED, masculine regeneration pending approval
+- [ ] Funmi talking-head video (new open-source lipsync engine, pending bake-off) -> lock prompt/look before any batch generation

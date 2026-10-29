@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { researchAgent, storyboardAgent, scriptAgent, criticAgent, exportAgent, LANGUAGES } from "./agents.js";
-import { creditSummary, LIMITS, charge, cacheGet, cacheSet, cacheKey, assertBudget } from "./credits.js";
-import { has, modalCall, modalJobCall, museImage, museTranscribe } from "./providers.js";
-import { PERSONAS, DEFAULT_PERSONA_ID, getPersona, voiceRoute, H3_NATIVE_AUDIO_LANGS } from "./personas.js";
+import { creditSummary, LIMITS, charge, cacheGet, cacheSet, cacheKey, contentHash, assertBudget } from "./credits.js";
+import { has, modalCall, modalJobCall, museImage, museTranscribe, samSegment } from "./providers.js";
+import { PERSONAS, DEFAULT_PERSONA_ID, getPersona, voiceRoute } from "./personas.js";
 
 const app = new Hono();
 app.use("*", cors());
@@ -15,10 +15,13 @@ const id = () => Math.random().toString(36).slice(2, 10);
 async function saveProject(env, p) {
   mem.projects.set(p.id, p);
   if (env?.DB) { try {
-    await env.DB.prepare(`INSERT INTO projects (id,name,description,url,category,audience,language,research,storyboard,script,status)
-      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(id) DO UPDATE SET research=excluded.research, storyboard=excluded.storyboard, script=excluded.script, status=excluded.status`)
+    // persona/keyframes/segmentation persist too, so a Workers cold start
+    // never re-bills Muse Image or reverts the locked creator (audit #17).
+    await env.DB.prepare(`INSERT INTO projects (id,name,description,url,category,audience,language,research,storyboard,script,status,persona,keyframes,segmentation)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(id) DO UPDATE SET research=excluded.research, storyboard=excluded.storyboard, script=excluded.script, status=excluded.status, persona=excluded.persona, keyframes=excluded.keyframes, segmentation=excluded.segmentation`)
       .bind(p.id, p.name, p.description, p.url, p.category, p.audience, p.language,
-        JSON.stringify(p.research || null), JSON.stringify(p.storyboard || null), JSON.stringify(p.script || null), p.status).run();
+        JSON.stringify(p.research || null), JSON.stringify(p.storyboard || null), JSON.stringify(p.script || null), p.status,
+        p.persona || null, JSON.stringify(p.keyframes || null), JSON.stringify(p.segmentation || null)).run();
   } catch {} }
   return p;
 }
@@ -26,7 +29,7 @@ async function getProject(env, pid) {
   if (mem.projects.has(pid)) return mem.projects.get(pid);
   if (env?.DB) { try {
     const row = await env.DB.prepare("SELECT * FROM projects WHERE id=?1").bind(pid).first();
-    if (row) { for (const k of ["research", "storyboard", "script"]) { try { row[k] = JSON.parse(row[k]); } catch {} } mem.projects.set(pid, row); return row; }
+    if (row) { for (const k of ["research", "storyboard", "script", "keyframes", "segmentation"]) { try { row[k] = JSON.parse(row[k]); } catch {} } mem.projects.set(pid, row); return row; }
   } catch {} }
   return null;
 }
@@ -41,27 +44,34 @@ async function getProject(env, pid) {
 //   Muse Voice Transcribe (Meta)— VERIFY stage: transcribes the finished
 //                                 audio, Muse Spark compares it with the
 //                                 script (word-level honesty check)
-// Video (MiniMax H3) and Nigerian voices (YarnGPT2/MMS) are NOT Meta —
-// they are the media engines Muse directs. Never claim otherwise.
+// Video (Wan 2.2 / LTX silent motion) and Nigerian voices (YarnGPT2/MMS)
+// are NOT Meta — they are the media engines Muse directs. Never claim
+// otherwise. MiniMax H3 is PARKED (2026-10-29: both H100 and H200 runs
+// failed the cost/speed bar) and is not submitted by any route until a
+// verdict test passes. SAM 3.1 (Meta) is segmentation, NOT a video
+// generator. Its role here is objective QC: person/phone presence in the
+// keyframe before any paid render + mask source for later compositing.
 export const MODEL_MAP = {
   research: "Muse Spark Open (Baseten)",
   storyboard: "Muse Spark Open (Baseten)",
   script: "Muse Spark Open (Baseten)",
   keyframe: "Muse Image 1.0 (Meta)",
   voice: "YarnGPT2 / MMS (Modal, open)",
-  video: { h3: "MiniMax H3 (Modal H100)", wan: "Wan 2.2 (Modal)", ltx: "LTX (Modal)" },
+  video: { h3: "MiniMax H3 (Modal H200, ON HOLD)", wan: "Wan 2.2 (Modal, primary)", ltx: "LTX 2.5 (Modal, cheapest)" },
   critic: "Muse Spark Open (Baseten)",
   stitch: "ffmpeg composite (Modal)",
   export: "Muse Spark Open (Baseten)",
   verify: "Muse Voice Transcribe 1.0 (Meta, verify stage)",
+  segment: "SAM 3.1 (Meta, keyframe QC)",
 };
 
-app.get("/api/health", (c) => c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["h3", "wan", "ltx"], models: MODEL_MAP, personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
+app.get("/api/health", (c) => c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["wan", "ltx"], h3_status: "parked", models: MODEL_MAP, personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
   providers: { baseten: has(c.env, "BASETEN_API_KEY"), meta: has(c.env, "META_API_KEY"),
     firecrawl: has(c.env, "FIRECRAWL_API_KEY"), exa: has(c.env, "EXA_API_KEY"),
     modal_tts: has(c.env, "MODAL_TTS_ENDPOINT"), modal_yarn: has(c.env, "MODAL_YARN_ENDPOINT"),
-    modal_wan: has(c.env, "MODAL_WAN_ENDPOINT"), modal_h3: has(c.env, "MODAL_H3_ENDPOINT"),
-    modal_stitch: has(c.env, "MODAL_STITCH_ENDPOINT") } }));
+    modal_wan: has(c.env, "MODAL_WAN_ENDPOINT"), modal_wan_result: has(c.env, "MODAL_WAN_RESULT_ENDPOINT"),
+    modal_h3: has(c.env, "MODAL_H3_ENDPOINT"), modal_h3_parked: true,
+    modal_stitch: has(c.env, "MODAL_STITCH_ENDPOINT"), modal_stitch_result: has(c.env, "MODAL_STITCH_RESULT_ENDPOINT") } }));
 
 app.get("/api/credits", (c) => c.json(creditSummary()));
 
@@ -84,7 +94,15 @@ async function stage(c, name, fn, status) {
   if (name === "storyboard" && !p.research) return c.json({ error: "Run research first" }, 400);
   if (name === "script" && !p.storyboard) return c.json({ error: "Run storyboard first" }, 400);
   const body = name === "storyboard" ? await c.req.json().catch(() => ({})) : {};
-  if (body.storyboard) p.storyboard = body.storyboard; // user edits from the studio
+  if (body.storyboard) {
+    p.storyboard = body.storyboard; // user edits from the studio
+    // A changed scene invalidates the still + QC for that scene only, so a
+    // regenerated still is re-checked by SAM instead of inheriting the old
+    // frame's verdict (audit #8 companion to the content-hash cache).
+    const edited = new Set((body.storyboard.scenes || []).map((s) => s.n));
+    if (Array.isArray(p.keyframes)) p.keyframes = p.keyframes.filter((f) => !edited.has(f.scene) || (body.storyboard.scenes || []).some((s) => s.n === f.scene && String(s.visual || "") === String((p.storyboard.scenes || []).find((o) => o.n === f.scene)?.visual || "")));
+  }
+  if (name === "storyboard" && (body.format === "confession" || body.format === "standard")) p.format = body.format;
   try { p[name] = await fn(c.env, p); }
   catch (e) { console.error(`[${name}]`, e); return c.json({ error: `${name} failed: ${e.message}` }, 502); }
   p.status = status;
@@ -95,16 +113,15 @@ app.post("/api/projects/:pid/research", (c) => stage(c, "research", researchAgen
 app.post("/api/projects/:pid/storyboard", (c) => stage(c, "storyboard", storyboardAgent, "storyboarded"));
 app.post("/api/projects/:pid/script", (c) => stage(c, "script", scriptAgent, "scripted"));
 
-// Generation (H3-MAX hybrid — user decision 2026-10-29, replaces the
-// SadTalker lip-sync chain which paired faces with mismatched voices):
-//   storyboard scenes -> persona keyframe -> H3 (video + native audio)
-//   - Nigerian English : keep H3's native dialogue (stable, best sync)
-//   - Pidgin/Yoruba/Hausa/Igbo : local voice FIRST (YarnGPT2, or MMS for
-//     Pidgin), its duration sizes the H3 clip, stitch swaps H3's track
-//     for the local voice so the spoken words are exactly our script.
-//   Persona is locked on the project: keyframe, H3 speaker description
-//   and TTS voice all derive from it (worker/src/personas.js).
-// Wan/LTX remain as fallback engines (silent I2V + local voice at stitch).
+// Generation (open-source-first — user decision 2026-10-29; H3 PARKED
+// after H100 + H200 both failed the cost/speed bar):
+//   storyboard scenes -> persona keyframe -> Wan 2.2 / LTX silent motion
+//   + local Nigerian voice FIRST (YarnGPT2, or MMS for Pidgin), its real
+//   duration sizes the motion clip, stitch muxes the voice onto the
+//   picture — the winning-UGC voiceover format: continuous talk + proof
+//   cutaways (real screen recordings composited as overlays, never AI-drawn).
+//   Persona is locked on the project: keyframe, motion prompt and TTS
+//   voice all derive from it (worker/src/personas.js).
 // Without Modal endpoints the job completes in labelled demo mode ($0).
 const volumeBasename = (u) => (u ? String(u).split("/").pop() : null);
 
@@ -126,13 +143,10 @@ async function speakLocal(env, EP, { text, language, persona }) {
     if (out.error) throw new Error(`voice: ${out.error}`);
     return { ...out, warning: route.warning };
   }
-  if (route.source === "mms") {
-    if (!EP.tts) throw new Error("MODAL_TTS_ENDPOINT not set (MMS voice app)");
-    const out = await modalCall(EP.tts, { text, language });
-    if (out.error) throw new Error(`voice: ${out.error}`);
-    return { ...out, warning: route.warning };
-  }
-  return null; // h3-native: no local track needed
+  if (!EP.tts) throw new Error("MODAL_TTS_ENDPOINT not set (MMS voice app)");
+  const out = await modalCall(EP.tts, { text, language });
+  if (out.error) throw new Error(`voice: ${out.error}`);
+  return { ...out, warning: route.warning };
 }
 
 // One Muse Image still for one scene (persona-locked; cached so the same
@@ -140,7 +154,8 @@ async function speakLocal(env, EP, { text, language, persona }) {
 // /generate, which auto-creates any missing still so a live run can never
 // silently bypass Muse Image (hackathon: Meta must be visibly in the flow).
 async function keyframeForScene(env, p, persona, scene) {
-  const prompt = `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, visible skin pores, natural imperfections, natural light. ${scene.visual}. Product: ${p.name} — ${p.description}. Shot: ${scene.shot}. NOT plastic skin, NOT airbrushed, NOT CGI, no beauty filter, vertical 9:16.`;
+  const look = scene.visual || persona.look_default || persona.look_yoruba || "";
+  const prompt = `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, visible skin pores, natural imperfections, natural light. ${look}. Product: ${p.name} — ${p.description}. Shot: ${scene.shot}. NOT plastic skin, NOT airbrushed, NOT CGI, no beauty filter, vertical 9:16.`;
   const key = cacheKey("keyframe", prompt);
   let url = cacheGet(key);
   if (url) { await charge(env, "meta", "muse_image", p.id, { cached: true }); return { url, cached: true }; }
@@ -160,23 +175,66 @@ async function keyframeForScene(env, p, persona, scene) {
 }
 
 // Ensures every scene in `scenes` has a Muse Image still on the project.
-// Returns { created:number[], reused:number[], error:string|null }.
-// A failure never throws — /generate records it and H3 falls back to its
-// anchor frame, with the gap honestly flagged on the job.
+// Returns { created:number[], reused:number[], failed:number[], error }.
+// A failure never throws, but failed scenes are named: /generate renders
+// them only when a still exists, so the Wan/LTX app never crashes inside
+// Modal on a missing keyframe (whose error message there is opaque).
 async function ensureKeyframes(env, p, persona, scenes) {
-  const out = { created: [], reused: [], error: null };
-  if (!has(env, "META_API_KEY")) { out.error = "META_API_KEY not set — Muse Image keyframes skipped (H3 anchor frame used)."; return out; }
-  try {
-    const frames = [...(p.keyframes || [])];
-    for (const s of scenes) {
-      if (frames.some((f) => f.scene === s.n)) { out.reused.push(s.n); continue; }
+  const out = { created: [], reused: [], failed: [], error: null };
+  if (!has(env, "META_API_KEY")) { out.error = "META_API_KEY not set — Muse Image keyframes skipped."; out.failed = scenes.map((s) => s.n); return out; }
+  for (const s of scenes) {
+    if ((p.keyframes || []).some((f) => f.scene === s.n)) { out.reused.push(s.n); continue; }
+    try {
       const { url } = await keyframeForScene(env, p, persona, s);
-      frames.push({ scene: s.n, keyframe_url: url });
+      p.keyframes = [...(p.keyframes || []), { scene: s.n, keyframe_url: url }];
       out.created.push(s.n);
+    } catch (e) {
+      out.failed.push(s.n);
+      out.error = `Muse Image keyframes failed for scene ${s.n} (${e.message}) — that scene will be skipped in the film.`;
     }
-    p.keyframes = frames;
-    await saveProject(env, p);
-  } catch (e) { out.error = `Muse Image keyframes failed (${e.message}) — H3 anchor frame used for affected scenes.`; }
+  }
+  await saveProject(env, p);
+  return out;
+}
+
+// SAM 3.1 QC (Meta, segmentation — NOT a video generator): run one noun
+// phrase per frame ("person", "phone") over the project's keyframes so a
+// broken/empty still is caught BEFORE a paid Wan/LTX render, not after.
+// Advisory: detections are recorded on p.segmentation; a failure or a
+// zero-person frame warns but never blocks generation. Both the in-run
+// cache and persisted results are keyed by image CONTENT hash, so a
+// regenerated still is re-checked instead of inheriting the old frame's
+// verdict (audit #8). Returns { checked, results, error } — never throws.
+async function segmentKeyframes(env, p, { scenes = null, force = false } = {}) {
+  const out = { checked: 0, results: [], error: null };
+  const frames = (p.keyframes || []).filter((f) => !scenes || scenes.some((s) => s.n === f.scene));
+  if (!frames.length) return out;
+  if (!has(env, "META_API_KEY")) { out.error = "META_API_KEY not set — SAM QC skipped."; return out; }
+  const stored = new Map((p.segmentation || []).map((r) => [r.scene, r]));
+  const PHRASES = ["person", "phone"];
+  for (const f of frames) {
+    const url = String(f.keyframe_url || "");
+    if (!url.startsWith("data:image")) continue; // SAM needs media we control; skip remote refs
+    const digest = contentHash(url);
+    const prior = stored.get(f.scene);
+    if (!force && prior?.image_hash === digest) { out.results.push(prior); out.checked++; continue; }
+    const detections = {};
+    for (const phrase of PHRASES) {
+      const key = cacheKey("sam", phrase, digest);
+      let hit = cacheGet(key);
+      if (!hit) {
+        try { hit = await samSegment(env, url, phrase); cacheSet(key, hit); await charge(env, "meta", "sam_segment", p.id); }
+        catch (e) { out.error = `SAM QC deferred: ${e.message}`; hit = { phrase, detections: null, boxes: [] }; }
+      } else { await charge(env, "meta", "sam_segment", p.id, { cached: true }); }
+      detections[phrase] = hit.detections;
+    }
+    out.results.push({ scene: f.scene, image_hash: digest, detections,
+      person_ok: detections.person == null ? null : detections.person > 0,
+      note: detections.person === 0 ? "No person detected in this keyframe — check the still before filming." : null });
+    out.checked++;
+  }
+  p.segmentation = [...(p.segmentation || []).filter((r) => !out.results.some((o) => o.scene === r.scene)), ...out.results];
+  await saveProject(env, p);
   return out;
 }
 
@@ -185,46 +243,64 @@ app.post("/api/projects/:pid/generate", async (c) => {
   if (!p) return c.json({ error: "Project not found" }, 404);
   if (!p.script) return c.json({ error: "Run script first" }, 400);
   const body = await c.req.json().catch(() => ({}));
-  const engine = body.engine || "h3"; // h3 max; wan | ltx fallbacks
+  const requestedEngine = String(body.engine || "wan").toLowerCase();
+  const engine = requestedEngine === "ltx" ? "ltx" : "wan"; // Wan primary; LTX cheapest. H3 is parked server-side, never submitted by this route.
   const persona = getPersona(body.persona || p.persona || DEFAULT_PERSONA_ID);
   p.persona = persona.id;
   const env = c.env;
   const EP = endpoints(env);
-  // Live = the chosen engine AND its async result endpoint are both wired
-  // (modalJobCall would otherwise throw minutes into a paid render).
-  const live = engine === "h3" ? Boolean(EP.h3 && EP.h3Result) : Boolean(EP.wan && EP.wanResult);
-  const nativeAudio = H3_NATIVE_AUDIO_LANGS.has((p.language || "").toLowerCase());
-  const job = { id: id(), project_id: p.id, stage: "generate", engine, persona: persona.id,
+  // Live only when Wan/LTX spawn + result endpoints are both wired; otherwise
+  // the job stays in clearly labelled demo mode and spends $0.
+  const live = Boolean(EP.wan && EP.wanResult);
+  const allScenes = p.storyboard?.scenes || [];
+  const requestedLimit = Number(body.limit);
+  const sceneLimit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 0), allScenes.length) : 0;
+  const scenes = sceneLimit ? allScenes.slice(0, sceneLimit) : allScenes;
+  const clipPaths = [], audioPaths = [], stitchedOverlays = [], stitchedLines = [], failedScenes = [];
+  const job = { id: id(), project_id: p.id, stage: "generate", engine, persona: persona.id, requested_engine: requestedEngine,
     models: { research: MODEL_MAP.research, storyboard: MODEL_MAP.storyboard, script: MODEL_MAP.script,
-      keyframe: MODEL_MAP.keyframe, voice: nativeAudio && engine === "h3" ? "MiniMax H3 native dialogue" : MODEL_MAP.voice,
-      video: MODEL_MAP.video[engine] || MODEL_MAP.video.h3, critic: MODEL_MAP.critic, stitch: MODEL_MAP.stitch },
-    audio_plan: nativeAudio && engine === "h3" ? "h3-native" : "local-voice",
+      keyframe: MODEL_MAP.keyframe, segment: MODEL_MAP.segment, voice: MODEL_MAP.voice,
+      video: MODEL_MAP.video[engine] || MODEL_MAP.video.wan, critic: MODEL_MAP.critic, stitch: MODEL_MAP.stitch,
+      verify: MODEL_MAP.verify },
+    audio_plan: "local-voice", scene_limit: sceneLimit,
     status: "running", progress: 10, scenes: [] };
   mem.jobs.set(job.id, job);
-
-  const allScenes = p.storyboard?.scenes || [];
-  const scenes = body.limit ? allScenes.slice(0, body.limit) : allScenes;
-  const clipPaths = [], audioPaths = [];
+  // Money gate (audit #4): the $50/credits.js caps must be able to stop a
+  // LIVE run before the first Modal submit, not just log it afterwards.
+  if (live) {
+    try { assertBudget("modal"); } catch (e) {
+      job.status = "error"; job.error = e.message;
+      job.note = "Generation refused by the credit guard before any Modal submit.";
+      return c.json(job, 402);
+    }
+  }
   try {
     // 0) Muse Image keyframes first: every live run must show Meta in the
     //    flow, so missing stills are created here even if the user never
     //    pressed "Generate keyframes" in the Studio.
     job.models.keyframe_status = live ? await ensureKeyframes(env, p, persona, scenes) : { created: [], reused: [], error: null };
+    // 0b) SAM 3.1 QC gate (advisory): confirm each still actually contains
+    //     a person before paying for its render. Cheap Meta call, cached.
+    job.models.segment_status = live ? await segmentKeyframes(env, p, { scenes }) : { checked: 0, results: [], error: null };
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i];
       const line = p.script?.lines?.[i] || { text: scene.key_line, seconds: scene.seconds };
       let clipUrl = null, mode = live ? "live" : "demo", audioUrl = null, voiceInfo = null;
+      // The whole-scene overlay slot (audit #11): editor intent -> real file.
+      // Overlay assets are REAL uploads only (never AI-drawn). Until the
+      // Studio upload lands they are null; the job keeps `overlay` (intent)
+      // separate from what stitch actually composited.
 
-      // 1) Local voice FIRST for NG languages (never for h3-native English):
-      //    its real duration sizes the video clip, and stitch will swap it in.
-      //    A missing voice endpoint degrades to "voice pending" (H3 track is
-      //    kept) — it must never kill an otherwise-working video job.
+      // 1) Local voice FIRST (all languages on Wan/LTX, which are silent):
+      //    its real duration sizes the motion clip, and stitch muxes it in.
+      //    A missing voice endpoint degrades to "voice pending" — it must
+      //    never kill an otherwise-working video job.
       let localAudio = null;
-      if (live && !(engine === "h3" && nativeAudio)) {
+      if (live) {
         try {
           localAudio = await speakLocal(env, EP, { text: line.text, language: p.language, persona });
         } catch (e) {
-          voiceInfo = { engine: "voice-pending", voice: null, warning: `Local voice unavailable (${e.message}) — H3 track kept for this scene.` };
+          voiceInfo = { engine: "voice-pending", voice: null, warning: `Local voice unavailable (${e.message}) — clip rendered silent for this scene.` };
         }
         if (localAudio) {
           await charge(env, "modal", "tts_scene", p.id);
@@ -232,24 +308,35 @@ app.post("/api/projects/:pid/generate", async (c) => {
         }
       }
 
-      // 2) Video clip per storyboard scene.
+      // 2) Video clip per storyboard scene. A failed scene must NOT kill
+      //    the film (audit #1): scenes that already rendered are stitched
+      //    into a partial cut, failures are named on the job, and the
+      //    completed work is never thrown away. A scene with no keyframe
+      //    is skipped here instead of crashing inside the Modal app
+      //    (audit #9); its voice, if any, still ships in the run record.
       if (live) {
-        const frame = (p.keyframes || []).find((f) => f.scene === scene.n);
-        const b64 = frame ? String(frame.keyframe_url).split(",").pop() : undefined;
-        const seconds = Math.min(Math.max(Number(line.seconds) || 6, 5), 15);
-        const out = engine === "h3"
-          ? await modalJobCall(EP.h3, EP.h3Result, {
-              scene, script: { text: line.text, seconds }, keyframe_b64: b64,
-              persona: { h3_description: persona.h3_description },
-              project: { name: p.name, language: p.language } })
-          : await modalJobCall(EP.wan, EP.wanResult, { engine, keyframe_b64: b64,
-              prompt: `${persona.h3_description}. ${scene.visual}. Talking naturally to camera, natural mouth movement while speaking.`,
-              project: { name: p.name, language: p.language } });
-        await charge(env, "modal", engine === "h3" ? "h3_clip" : engine === "wan" ? "wan_clip" : "ltx_clip", p.id);
-        if (out.error) throw new Error(`${engine} scene ${scene.n}: ${out.error}`);
-        clipUrl = out.clip_url;
-        clipPaths.push(out.clip_volume_path || volumeBasename(clipUrl));
-        audioPaths.push(localAudio?.audio_volume_path || null);
+        try {
+          const frame = (p.keyframes || []).find((f) => f.scene === scene.n);
+          if (!frame?.keyframe_url) throw new Error(`no Muse Image keyframe for scene ${scene.n} — scene skipped (see keyframe_status)`);
+          const b64 = String(frame.keyframe_url).split(",").pop();
+          const seconds = Math.min(Math.max(Number(line.seconds) || 6, 5), 15);
+          const out = await modalJobCall(EP.wan, EP.wanResult, { engine, keyframe_b64: b64,
+            prompt: `${persona.h3_description}. ${scene.visual}. Natural talking-head UGC motion, looking into camera, relaxed gestures, no text, no logo.`,
+            seconds,
+            project: { name: p.name, language: p.language } });
+          await charge(env, "modal", engine === "wan" ? "wan_clip" : "ltx_clip", p.id);
+          if (out.error) throw new Error(`${engine} scene ${scene.n}: ${out.error}`);
+          clipUrl = out.clip_url;
+          mode = "live";
+          clipPaths.push(out.clip_volume_path || volumeBasename(clipUrl));
+          audioPaths.push(localAudio?.audio_volume_path || null);
+          stitchedOverlays.push(scene.overlay || null);
+          stitchedLines.push(line);
+        } catch (e) {
+          mode = "failed";
+          failedScenes.push({ scene: scene.n, error: e.message });
+          voiceInfo = voiceInfo ?? { engine: "voice-pending", voice: null, warning: null };
+        }
       }
 
       // 3) Critic gate (advisory until frame-aware critic lands — verdicts
@@ -259,42 +346,54 @@ app.post("/api/projects/:pid/generate", async (c) => {
         verdict = await criticAgent(env, p, scene, attempt);
         if (verdict.verdict === "pass") break;
       }
-      job.scenes.push({ scene: scene.n, engine, mode, clip_url: clipUrl, audio_url: audioUrl,
-        voice: voiceInfo ? { engine: voiceInfo.engine, voice: voiceInfo.voice, warning: voiceInfo.warning || null } : { engine: "h3-native" },
+      job.scenes.push({ scene: scene.n, engine, mode, clip_url: clipUrl, audio_url: audioUrl, overlay: scene.overlay || null,
+        overlay_status: scene.overlay ? "intent recorded — a real uploaded proof asset is required before stitch can composite it" : null,
+        voice: voiceInfo ? { engine: voiceInfo.engine, voice: voiceInfo.voice, warning: voiceInfo.warning || null } : { engine: "voice-pending" },
         critic: verdict });
       job.progress = 10 + Math.round(((i + 1) / Math.max(scenes.length, 1)) * 80);
     }
     if (live && clipPaths.length && EP.stitch) {
-      const stitched = await modalJobCall(EP.stitch, EP.stitchResult, {
-        clip_volume_paths: clipPaths,
-        audio_volume_paths: audioPaths,
-        lines: scenes.map((s, i) => p.script?.lines?.[i] || { text: s.key_line, seconds: s.seconds }),
-        project_id: p.id,
-      });
-      await charge(env, "modal", "stitch", p.id);
-      job.final_video_url = stitched.final_video_url || null;
-      job.final_volume_path = stitched.final_volume_path || null;
+      try {
+        assertBudget("modal");
+        const stitched = await modalJobCall(EP.stitch, EP.stitchResult, {
+          clip_volume_paths: clipPaths,
+          audio_volume_paths: audioPaths,
+          overlays: stitchedOverlays,
+          lines: stitchedLines,
+          project_id: p.id,
+        }, { timeoutMs: 600000 }); // stitch app itself times out at 600s (audit #13)
+        await charge(env, "modal", "stitch", p.id);
+        job.final_video_url = stitched.final_video_url || null;
+        job.final_volume_path = stitched.final_volume_path || null;
+        job.overlays_applied = stitched.overlays_applied ?? null;
+      } catch (e) { job.stitch_error = e.message; } // rendered scenes survive a stitch failure too
     }
-    job.status = "complete"; job.progress = 100;
+    if (live && failedScenes.length) job.failed_scenes = failedScenes;
+    job.status = (live && clipPaths.length === 0 && scenes.length > 0) ? "error" : "complete";
+    job.progress = job.status === "complete" ? 100 : 90;
     job.note = live
-      ? (engine === "h3" && nativeAudio
-          ? "H3 generated picture + native voice. Media lives in the talla-outputs volume until R2 keys are set, then URLs become public."
-          : "H3 picture + local Nigerian voice swapped in at stitch. Media lives in the talla-outputs volume until R2 keys are set.")
-      : "Demo mode: Modal endpoints not configured for this engine. No credits were spent.";
+      ? (failedScenes.length
+          ? `Partial film: ${clipPaths.length}/${scenes.length} scenes rendered; scenes ${failedScenes.map((f) => f.scene).join(", ")} failed and were left out rather than killing the whole run. Finished media is preserved for the posting package.`
+          : `${engine === "wan" ? "Wan 2.2" : "LTX 2.5"} picture (silent motion) + local Nigerian voice muxed at stitch — the winning-UGC voiceover format. Media lives in the talla-outputs volume until R2 keys are set.`)
+      : "Demo mode: Wan/LTX Modal endpoints are not configured. No media credits were spent on this job.";
   } catch (e) {
     job.status = "error"; job.error = e.message;
     job.note = "Generation stopped — see error. Completed scenes are kept above.";
   }
-  p.status = job.status === "complete" ? "generated" : p.status;
+  p.status = job.status === "complete" ? "generated" : job.status === "error" ? "generate_error" : p.status;
   // Optional final step: attach a ready-to-post export package (caption in
   // the video's language + hashtags + video ref). Best-effort — a caption
   // failure must never fail a completed film. Also available standalone at
   // POST /api/projects/:pid/export for manual/copy-only use.
   if (job.status === "complete") {
-    // Verify: transcribe the local voice track(s) vs the script lines.
-    const expected = (p.script?.lines || []).map((l) => l.text).join(" ");
-    const firstVoice = job.scenes.find((s) => s.audio_url)?.audio_url || null;
-    job.verification = await verifySpoken(env, p, firstVoice, expected, p.language);
+    // Verify: transcribe the FIRST shipped voice track against ITS OWN
+    // script line (audit #7 — comparing one scene's audio to the whole
+    // script would understate similarity on every multi-scene job).
+    const firstScene = job.scenes.find((s) => s.audio_url);
+    const firstLine = firstScene ? (p.script?.lines || []).find((l) => l.scene === firstScene.scene) : null;
+    job.verification = await verifySpoken(env, p, firstScene?.audio_url || null,
+      firstLine?.text || (p.script?.lines || [])[0]?.text || "", p.language);
+    job.verification.scope = firstScene ? `scene ${firstScene.scene} vs its script line` : "no shipped voice";
     try { job.posting_package = await exportAgent(env, p, job); } catch {}
   }
   await saveProject(env, p);
@@ -310,7 +409,7 @@ app.post("/api/projects/:pid/generate", async (c) => {
 async function verifySpoken(env, p, audioRef, expectedText, language) {
   const out = { status: "skipped", expected: expectedText || "", heard: null, similarity: null, words: null, note: null };
   if (!has(env, "META_API_KEY")) { out.note = "META_API_KEY not set — verify skipped."; return out; }
-  if (!audioRef) { out.note = "No local voice track to verify (H3-native audio is checked by the critic score, not transcription)."; return out; }
+  if (!audioRef) { out.note = "No local voice track was produced for this job, so transcription verify has nothing to compare against the script."; return out; }
   try {
     let b64 = null;
     if (String(audioRef).startsWith("data:audio")) b64 = String(audioRef).split(",").pop();
@@ -359,14 +458,6 @@ app.post("/api/projects/:pid/voice-preview", async (c) => {
     || "Na this one finally solve am, no wahala again.";
   const EP = endpoints(c.env);
   const route = voiceRoute(p.language, persona);
-  if (route.source === "h3") {
-    // English: preview the local twin of the H3 voice persona.
-    if (!EP.yarn) return c.json({ error: "MODAL_YARN_ENDPOINT not set" }, 400);
-    const out = await modalCall(EP.yarn, { text, language: p.language, voice: route.voice, gender: persona.gender });
-    if (out.error) return c.json({ error: out.error }, 502);
-    await charge(c.env, "modal", "tts_scene", p.id);
-    return c.json({ ...out, persona: persona.id, plan: "h3-native (preview uses YarnGPT twin voice)" });
-  }
   try {
     const out = await speakLocal(c.env, EP, { text, language: p.language, persona });
     await charge(c.env, "modal", "tts_scene", p.id);
@@ -390,6 +481,18 @@ app.post("/api/projects/:pid/keyframes", async (c) => {
   const status = await ensureKeyframes(c.env, p, persona, wanted);
   if (status.error) return c.json({ error: status.error }, 502);
   return c.json({ project_id: p.id, keyframes: p.keyframes });
+});
+
+// SAM 3.1 QC on the project's keyframes (advisory — never blocks filming).
+// Body: { scene?: number } to limit to one scene.
+app.post("/api/projects/:pid/qc", async (c) => {
+  const p = await getProject(c.env, c.req.param("pid"));
+  if (!p) return c.json({ error: "Project not found" }, 404);
+  if (!(p.keyframes || []).length) return c.json({ error: "Generate keyframes first" }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const scenes = body.scene && p.storyboard ? p.storyboard.scenes.filter((s) => s.n === body.scene) : null;
+  const res2 = await segmentKeyframes(c.env, p, { scenes, force: !!body.force });
+  return c.json({ project_id: p.id, segmentation: p.segmentation, qc: res2 });
 });
 
 app.get("/api/jobs/:jid", (c) => {

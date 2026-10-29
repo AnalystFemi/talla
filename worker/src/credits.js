@@ -8,7 +8,7 @@ export const TOTAL_BUDGET_USD = 50;
 export const BUDGETS_USD = {
   baseten: 20,    // Muse Spark Open: research, storyboard, script, critic
   meta: 15,       // Muse Image keyframes + character regeneration + finals
-  modal: 10,      // GPU media — H3 cold starts are the risk; see CREDITS.md
+  modal: 10,      // GPU media — Wan/LTX cold starts are the risk; see CREDITS.md
   firecrawl: 5,   // research enrichment (Exa skipped — key pending)
 };
 
@@ -16,8 +16,9 @@ export const BUDGETS_USD = {
 export const COSTS_USD = {
   "baseten:research": 0.02, "baseten:storyboard": 0.015, "baseten:script": 0.02,
   "baseten:critic": 0.01, "baseten:export": 0.01, "meta:muse_image": 0.01, "meta:spark_final": 0.05,
-  "meta:muse_transcribe": 0.01, "meta:spark_polish": 0.03,
-  "modal:h3_clip": 0.35, "modal:wan_clip": 0.08,
+  "meta:muse_transcribe": 0.01, "meta:spark_polish": 0.03, "meta:sam_segment": 0.02,
+  "modal:h3_clip": 0.9, // PARKED legacy estimate — no route submits H3 (see worker index.js)
+  "modal:wan_clip": 0.08,
   "modal:ltx_clip": 0.02, "modal:tts_scene": 0.01, "modal:stitch": 0.02,
   "firecrawl:scrape": 0.005, "exa:search": 0.005,
 };
@@ -33,6 +34,16 @@ const cache = new Map(); // hash -> result, prevents paying twice for same input
 
 export function cacheKey(...parts) {
   return parts.join("|").slice(0, 500);
+}
+
+/** Stable short content fingerprint (FNV-1a hex). Used so content-addressed
+ * caches (SAM QC, keyframes) are keyed by the image itself, not by a URL
+ * suffix that a regenerated still could share with its predecessor. */
+export function contentHash(input) {
+  const s = String(input || "");
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return "h" + h.toString(16).padStart(8, "0") + "-" + s.length;
 }
 export function cacheGet(key) { return cache.get(key); }
 export function cacheSet(key, value) { cache.set(key, value); return value; }

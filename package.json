@@ -8,6 +8,6 @@
     "build:web": "npm --prefix web run build",
     "smoke": "node scripts/smoke.mjs",
     "deploy:api": "npm --prefix worker run deploy",
-    "deploy:web": "npm --prefix web run build && wrangler pages deploy web/dist --project-name talla"
+    "deploy:web": "npm --prefix web run build && npm --prefix worker exec wrangler pages deploy web/dist --project-name talla"
   }
 }

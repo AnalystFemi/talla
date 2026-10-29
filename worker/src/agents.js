@@ -8,6 +8,35 @@ import { charge, cacheGet, cacheSet, cacheKey, assertBudget } from "./credits.js
 
 export const LANGUAGES = ["pidgin", "yoruba", "hausa", "igbo", "nigerian-english"];
 
+// Script formats — "standard" is the original generic UGC; "confession" is
+// the winning-UGC recreation format ("I stopped using X and now ... copy
+// me"): continuous voiceover + proof cutaways. Chosen per project via
+// project.format (persisted by the stage route from body.format).
+export const SCRIPT_FORMATS = ["standard", "confession"];
+
+const CONFESSION_BEATS = `Confession-format beats (in order): 1 Hook-confession ("I stopped using X..."), 2 Pain-agitation (what the old option cost them), 3 Switch (the new workflow/product in one sentence), 4 Proof-stack (live demo, before/after, zoom on the detail — one proof per scene), 5 Copy-me CTA (permission + exact next step). Every line must sound like a friend gisting, not a TV presenter. One idea per scene, short spoken sentences.`;
+
+const OVERLAY_SCHEMA = `Each scene may carry an optional "overlay" for the proof cutaway: null (face-only A-roll) or {asset:"receipt-screenshot"|"screen-recording"|"before-after"|null, note:"what the editor should composite, max 12 words", seconds:2-6, style:"pip"|"fullscreen"}. Face-only hook/CTA scenes use null; Proof scenes SHOULD set an overlay.`;
+
+function demoStoryboard(format, hooks) {
+  const base = [
+    { n: 1, purpose: "Hook", shot: "talking-head close-up", key_line: hooks[0], seconds: 6, visual: "Creator to camera, product in hand, natural window light", overlay: null },
+    { n: 2, purpose: "Pain", shot: "POV demo", key_line: "Show the old frustrating way in 3 seconds", seconds: 7, visual: "Hands struggling with the old option", overlay: null },
+    { n: 3, purpose: "Proof", shot: "product demo", key_line: "Show the product solving it, no filter", seconds: 9, visual: "Close-up proof moment, real environment", overlay: { asset: "screen-recording", note: "Real product screen solving it, fullscreen", seconds: 5, style: "fullscreen" } },
+    { n: 4, purpose: "Testimonial", shot: "talking-head", key_line: "One honest sentence on why they switched", seconds: 8, visual: "Same creator, relaxed smile, nods", overlay: null },
+    { n: 5, purpose: "CTA", shot: "talking-head + text overlay", key_line: "Tell them exactly what to do next", seconds: 6, visual: "Product centred, CTA text, AI-generated label visible", overlay: null },
+  ];
+  if (format !== "confession") return base;
+  return [
+    { n: 1, purpose: "Hook-confession", shot: "talking-head close-up", key_line: hooks[0] || "I stopped using the old way, and this looks 100% real now — copy me", seconds: 6, visual: "Creator leans in, direct to camera, pattern-break energy", overlay: null },
+    { n: 2, purpose: "Pain-agitation", shot: "talking-head", key_line: "Name what the old option cost: time, money, fake look", seconds: 7, visual: "Same creator, frustrated gist, quick hand gestures", overlay: null },
+    { n: 3, purpose: "Switch", shot: "talking-head + product", key_line: "The new workflow in one sentence, product visible", seconds: 6, visual: "Creator holds product up, then back to face", overlay: null },
+    { n: 4, purpose: "Proof-stack-1", shot: "product demo", key_line: "Live demo: watch it work, no filter", seconds: 9, visual: "Close-up proof moment, real environment", overlay: { asset: "screen-recording", note: "Real product screen working, fullscreen", seconds: 5, style: "fullscreen" } },
+    { n: 5, purpose: "Proof-stack-2", shot: "before/after", key_line: "Before vs after, zoom on the detail", seconds: 8, visual: "Side-by-side comparison, zoom on texture/detail", overlay: { asset: "before-after", note: "Before/after stills, zoom on detail", seconds: 4, style: "pip" } },
+    { n: 6, purpose: "Copy-me-CTA", shot: "talking-head + text overlay", key_line: "Copy me: exact next step in one sentence", seconds: 6, visual: "Product centred, CTA text, AI-generated label visible", overlay: null },
+  ];
+}
+
 const UGC_STYLE = `Photoreal UGC rules: raw iPhone selfie, visible pores, natural light, everyday Nigerian setting. NEVER: plastic skin, airbrushed, CGI, beauty filter.`;
 
 function demoResearch(p) {
@@ -51,39 +80,40 @@ export async function researchAgent(env, project) {
 }
 
 export async function storyboardAgent(env, project) {
+  const format = project.format === "confession" ? "confession" : "standard";
   if (!has(env, "BASETEN_API_KEY")) {
     const hooks = project.research?.hooks || ["See why everybody dey talk about this"];
-    return { mode: "demo", scenes: [
-      { n: 1, purpose: "Hook", shot: "talking-head close-up", key_line: hooks[0], seconds: 6, visual: "Creator to camera, product in hand, natural window light" },
-      { n: 2, purpose: "Pain", shot: "POV demo", key_line: "Show the old frustrating way in 3 seconds", seconds: 7, visual: "Hands struggling with the old option" },
-      { n: 3, purpose: "Proof", shot: "product demo", key_line: "Show the product solving it, no filter", seconds: 9, visual: "Close-up proof moment, real environment" },
-      { n: 4, purpose: "Testimonial", shot: "talking-head", key_line: "One honest sentence on why they switched", seconds: 8, visual: "Same creator, relaxed smile, nods" },
-      { n: 5, purpose: "CTA", shot: "talking-head + text overlay", key_line: "Tell them exactly what to do next", seconds: 6, visual: "Product centred, CTA text, AI-generated label visible" },
-    ]};
+    return { mode: "demo", format, scenes: demoStoryboard(format, hooks) };
   }
   assertBudget("baseten");
+  const formatBrief = format === "confession"
+    ? `FORMAT: confession (winning-UGC recreation). 4-7 scenes, total 25-45s, each 5-15s. ${CONFESSION_BEATS} ${OVERLAY_SCHEMA}`
+    : `FORMAT: standard. 3-7 scenes, total 25-40s, each 5-15s. Talking-head primary. ${OVERLAY_SCHEMA}`;
   const out = await basetenChat(env, [
-    { role: "system", content: "You are Talla's Storyboard agent. Return ONLY JSON {scenes:[{n,purpose,shot,key_line,seconds,visual}]}. 3-7 scenes, total 25-40s, each 5-15s. Talking-head primary." },
+    { role: "system", content: `You are Talla's Storyboard agent. Return ONLY JSON {scenes:[{n,purpose,shot,key_line,seconds,visual,overlay}]}. ${formatBrief}` },
     { role: "user", content: `Product: ${project.name} (${project.description})\nResearch: ${JSON.stringify(project.research)}` },
   ]);
   await charge(env, "baseten", "storyboard", project.id);
-  return { mode: "live", ...out };
+  const scenes = (out.scenes || []).map((s) => ({ overlay: null, ...s }));
+  return { mode: "live", format, scenes };
 }
 
 export async function scriptAgent(env, project) {
   const lang = project.language || project.research?.recommended_language || "pidgin";
+  const format = project.format === "confession" ? "confession" : "standard";
   if (!has(env, "BASETEN_API_KEY")) {
-    return { mode: "demo", language: lang, lines: (project.storyboard?.scenes || []).map((s) => ({
+    return { mode: "demo", language: lang, format, lines: (project.storyboard?.scenes || []).map((s) => ({
       scene: s.n, text: s.n === 1 ? (project.research?.hooks?.[0] || s.key_line) : s.key_line, seconds: s.seconds,
     }))};
   }
   assertBudget("baseten");
+  const formatBrief = format === "confession" ? CONFESSION_BEATS : "Standard UGC: hook, pain, proof, testimonial, CTA. One idea per scene.";
   const out = await basetenChat(env, [
-    { role: "system", content: `You are Talla's Scriptwriter. Write in ${lang} exactly as a Nigerian creator would speak it. Return ONLY JSON {language, lines:[{scene,text,seconds}]}. Short spoken lines, one idea per scene.` },
+    { role: "system", content: `You are Talla's Scriptwriter. Write in ${lang} exactly as a Nigerian creator would speak it. Return ONLY JSON {language, lines:[{scene,text,seconds}]}. Short spoken lines, one idea per scene. ${formatBrief}` },
     { role: "user", content: `Storyboard: ${JSON.stringify(project.storyboard)}\nResearch: ${JSON.stringify(project.research)}` },
   ]);
   await charge(env, "baseten", "script", project.id);
-  return { mode: "live", ...out };
+  return { mode: "live", format, ...out };
 }
 
 export async function exportAgent(env, project, job) {
@@ -123,12 +153,12 @@ export async function criticAgent(env, project, scene, attempt) {
   // product, unnatural local speech. Max retries enforced by LIMITS.
   if (!has(env, "BASETEN_API_KEY")) {
     return { mode: "demo", scene: scene.n ?? scene.scene, attempt, verdict: "pass", score: 8,
-      checks: { lip_sync: "pass", skin_realism: "pass", product_accuracy: "pass", language_naturalness: "pass" },
+      checks: { face_consistency: "pass", skin_realism: "pass", product_accuracy: "pass", language_naturalness: "pass" },
       note: "Demo critic — connect Baseten for live Muse Spark criticism." };
   }
   assertBudget("baseten");
   const out = await basetenChat(env, [
-    { role: "system", content: "You are Talla's Critic. Return ONLY JSON {verdict:pass|reject, score:1-10, checks:{face_consistency,skin_realism,product_accuracy,language_naturalness}, note}. Reject plastic skin, wrong product, unnatural Nigerian speech, or a scene framing the persona/H3 shot cannot perform. NOTE: you judge the scene plan and script text only (frame-aware video scoring is roadmap) — say so honestly in the note if relevant." },
+    { role: "system", content: "You are Talla's Critic. Return ONLY JSON {verdict:pass|reject, score:1-10, checks:{face_consistency,skin_realism,product_accuracy,language_naturalness}, note}. Reject plastic skin, wrong product, unnatural Nigerian speech, or a scene framing the chosen Wan/LTX shot cannot perform (Wan/LTX silent motion + local voice; calling-head close-ups are judged leniently until the open-source lipsync bake-off lands). NOTE: you judge the scene plan and script text only (frame-aware video scoring is roadmap) — say so honestly in the note if relevant." },
     { role: "user", content: `Scene: ${JSON.stringify(scene)}\nExpected product: ${project.name} — ${project.description}\nLanguage: ${project.language}` },
   ]);
   await charge(env, "baseten", "critic", project.id);

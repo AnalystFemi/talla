@@ -9,19 +9,19 @@ npm run dev:api    # http://localhost:8787
 npm run dev:web    # http://localhost:5173
 node scripts/smoke.mjs
 ```
-No keys = every stage returns clearly-labelled demo output; the complete flow (homepage → studio → research → storyboard → script → critic-gated generate → credits) works end-to-end. Add keys to `.env` (see `.env.example`) to go live stage by stage.
+No keys = demo mode: every stage returns clearly-labelled demo output and the full flow (homepage → studio → research → storyboard → script → generate → credits) works end-to-end. One exception: keyframes (Muse Image) need `META_API_KEY`, so without it `/generate` falls back to a labelled H3/Wan anchor frame and the job flags the gap honestly. The critic is advisory (scores shown per scene), not a gate. Add keys to `.env` (see `.env.example`) to go live stage by stage.
 
 ## Architecture
 - `web/` — React/Vite, Cloudflare Pages. Riverside-style homepage (§8) + studio flow.
 - `worker/` — Hono API. Runs locally via @hono/node-server, deploys unchanged to Cloudflare Workers. D1 (projects/jobs/credits) + R2 (media) when bound, in-memory locally.
-- `modal/` — Cloud GPU only: `h3_app.py` (MiniMax H3, primary, H100:4), `wan_app.py` (Wan 2.2 + LTX), `lipsync_app.py` (LivePortrait), `tts_app.py` (SoroTTS/WazobiaVoice), `stitch_app.py` (FFmpeg, captions, AI-generated label). Outputs upload Modal → R2 directly. Nothing >5MB is downloaded or rendered locally.
+- `modal/` — Cloud GPU only: `wan_app.py` (Wan 2.2 + LTX — PRIMARY silent-motion video), `yarngpt_app.py` (YarnGPT2, self-hosted voices for Yoruba/Hausa/Igbo), `tts_app.py` (MMS voices for Pidgin), `stitch_app.py` (FFmpeg composite + captions + AI label), `h3_app.py` (MiniMax H3 — ON HOLD/parked; needs a fresh Modal deploy before use), `lipsync_app.py` (parked, unused). Outputs upload Modal → R2 directly. Nothing >5MB is downloaded or rendered locally.
 - `worker/src/credits.js` — budget enforcement: caching, retry caps, 768p-first, per-call estimates. See `CREDITS.md`.
-- `docs/rea-findings.md` — REA/Ava reverse-engineering status (blocked on Node >=22.23.4).
 
 ## Deploy (after local works)
 ```powershell
-wrangler d1 create talla; wrangler r2 bucket create talla-media
-# paste database_id into wrangler.toml, then:
+# One-time, already done — wrangler.toml already holds the D1 database_id + R2 bucket:
+# wrangler d1 create talla; wrangler r2 bucket create talla-media
+# Then deploy:
 npm run deploy:api
 npm run deploy:web
 wrangler secret put BASETEN_API_KEY  # repeat per key

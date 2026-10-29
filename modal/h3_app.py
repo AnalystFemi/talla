@@ -1,5 +1,11 @@
 """MiniMax H3 — PRIMARY video engine, self-hosted on Modal (brief SS5).
 
+2026-10-29: H100 build paged out — the 124GB weights exceed 80GB VRAM, so
+ComponentsManager CPU-offload streaming made 49-step renders exceed the
+1800s Modal timeout (Funmi 9s render died, ~$15 total day spend). This build
+runs on H200 (141GB VRAM): both partitions resident on GPU, no streaming.
+Payload accepts `num_inference_steps` (draft 28 / final 49).
+
 Open weights: MiniMaxAI/MiniMax-H3 (33B, MiniMax H3 Community License).
 H3 is omni-modal: it generates video AND synchronized stereo audio in one
 denoising loop (diffusers MiniMaxH3Blocks, workflows fl2va/ref2va/t2va).
@@ -7,9 +13,9 @@ Stable dialogue languages are 11 (incl. English) — Pidgin/Yoruba/Hausa/Igbo
 are NOT stable, so for those the Worker keeps H3's picture and swaps in our
 local TTS track at stitch time. See worker/src/index.js generate chain.
 
-Loading follows the diffusers recipe: ModularPipeline + ComponentsManager
-with auto CPU offload — the 61.7GB transformer + 62.1GB Qwen3-VL conditioner
-do NOT fit on one GPU, they stream. We load only the fl2va workflow
+Loading follows the diffusers recipe: ModularPipeline; on H200 (141GB
+VRAM) the 61.7GB transformer + 62.1GB Qwen3-VL conditioner both stay
+resident on GPU (no offload streaming). We load only the fl2va workflow
 (transformer/ partition) to halve the download.
 
 Output: results["videos"] + results["audio"] + results["sampling_rate"];
@@ -18,7 +24,8 @@ carries H3's native soundtrack. Payload may set audio_mode="silent" to
 skip keeping native audio semantics in the prompt (Worker replaces it).
 
 CREDIT GUARD: 768p short edge, 9:16 canvas, <=15s per clip,
-scaledown_window small so idle GPUs stop billing quickly.
+scaledown_window 900s — warm during a generation session (model loads
+ONCE), then parks to $0. Draft renders use num_inference_steps=28.
 """
 import modal
 
@@ -35,13 +42,20 @@ image = (
                     "diffusers>=0.35.0", "transformers>=4.51.0",
                     "accelerate>=1.6.0", "huggingface-hub", "pillow", "boto3",
                     "av", "fastapi[standard]", "protobuf==4.25.8")
-    .env({"HF_HOME": "/weights"})
+    .env({"HF_HOME": "/weights",
+          # expandable segments reduce fragmentation OOMs during the long
+          # denoise (Funmi v4 run died at 78.6/79.2GB, 2026-10-29).
+          "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     .add_local_python_source("r2")
 )
 
 # H3 dialogue language tags (stable set). Anything else is described to the
 # model in English and voiced locally — the Worker swaps the track.
 H3_LANG_TAG = {"nigerian-english": "English", "english": "English"}
+
+# Steps: 49 = final-quality default (model card); 28 = draft/calibration
+# tier (approved by user 2026-10-29 for cheap previews).
+DEFAULT_STEPS = 49
 
 
 def build_prompt(payload: dict) -> str:
@@ -71,7 +85,7 @@ def build_prompt(payload: dict) -> str:
 
 
 @app.cls(image=image, volumes={"/weights": weights, "/outputs": outputs},
-         gpu="H100", timeout=1800, scaledown_window=60, memory=131072)
+         gpu="H200", timeout=3600, scaledown_window=900, memory=131072)
 class H3Engine:
     @modal.enter()
     def load(self):
@@ -84,19 +98,17 @@ class H3Engine:
         #   ModularPipeline.from_pretrained(...).blocks.get_workflow("fl2va")
         #     .init_pipeline(..., components_manager=manager)
         # then load_components(dtype=...) on that pruned pipeline.
-        # Memory: 61.7GB transformer + 62.1GB Qwen3-VL conditioner cannot be
-        # resident together on one H100 — ComponentsManager auto-offload
-        # streams them (host RAM holds the rest; hence memory=128GB).
-        # NOTE: fallback (no offload manager) can only work if both partitions
-        # fit on the GPU — on H100-80GB they don't, so attempt 2 is a last
-        # resort for multi-GPU nodes. Component-load ImportErrors (missing
-        # deps) fail identically in both; the traceback says which.
+        # Memory: 61.7GB transformer + 62.1GB Qwen3-VL conditioner = ~124GB.
+        # H200 has 141GB VRAM, so both partitions stay resident on the GPU —
+        # NO ComponentsManager auto-offload streaming (that streaming is what
+        # made H100 renders exceed the 1800s timeout). Attempt 2 keeps the
+        # offload path as a fallback for smaller GPUs.
         last_err = None
-        for attempt, use_manager in enumerate((True, False), 1):
+        for attempt, use_manager in enumerate((False, True), 1):
             try:
                 manager = ComponentsManager() if use_manager else None
                 if manager:
-                    manager.enable_auto_cpu_offload(device="cuda", memory_reserve_margin="12GB")
+                    manager.enable_auto_cpu_offload(device="cuda", memory_reserve_margin="16GB")
                 full = ModularPipeline.from_pretrained("MiniMaxAI/MiniMax-H3")
                 wf = full.blocks.get_workflow("fl2va")
                 pipe = wf.init_pipeline("MiniMaxAI/MiniMax-H3", components_manager=manager)
@@ -134,20 +146,28 @@ class H3Engine:
         num_frames = 17 * n + 5
         # Explicit 9:16 canvas at 768 short edge (multiples of 32). Without
         # this, a text-only call falls back to the 16:9 default canvas.
+        steps = int(payload.get("num_inference_steps") or DEFAULT_STEPS)
+        steps = min(max(steps, 10), 60)
         kwargs = {"prompt": build_prompt(payload), "num_frames": num_frames,
                   "height": 1344, "width": 768,
+                  "num_inference_steps": steps,
                   "generator": torch.Generator().manual_seed(42),
                   "output": ["videos", "audio", "sampling_rate"]}
         if payload.get("keyframe_b64") or payload.get("keyframe_url"):
             import base64
             raw = base64.b64decode(payload["keyframe_b64"]) if payload.get("keyframe_b64") else requests.get(payload["keyframe_url"], timeout=120).content
-            kwargs["image"] = Image.open(io.BytesIO(raw)).convert("RGB")
+            # Downscale the condition image to the render canvas BEFORE the
+            # conditioner sees it — feeding the full-res 1280x1920 keyframe
+            # OOM'd the Funmi v4 run (78.6/79.2GB allocated).
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            kwargs["image"] = img.resize((768, 1344), Image.LANCZOS)
         else:
             # fl2va REQUIRES a condition image: MiniMaxH3PrepareConditionLatents
             # does torch.cat over condition_latents and crashes on an empty
             # list (hit 2026-10-29). A neutral dark anchor still lets the model
             # generate freely; real runs pass the persona keyframe.
             kwargs["image"] = Image.new("RGB", (768, 1344), (24, 24, 24))
+        torch.cuda.empty_cache()
         results = self.pipe(**kwargs)
         videos, audio, sr = results["videos"], results.get("audio"), results.get("sampling_rate")
         name = f"h3_{int(time.time())}.mp4"
@@ -161,7 +181,8 @@ class H3Engine:
         url = upload_to_r2(raw, f"clips/{os.path.basename(raw)}")
         outputs.commit()
         return {"clip_url": url, "clip_volume_path": name, "has_audio": has_audio,
-                "engine": "h3", "mode": "live"}
+                "engine": "h3", "mode": "live", "num_inference_steps": steps,
+                "gpu": "H200", "num_frames": num_frames}
 
 
 @app.function(image=image, timeout=120)
