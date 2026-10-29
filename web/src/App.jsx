@@ -12,7 +12,8 @@ const PIPELINE = [
   ["Research", "Pain points, hooks, formats · Muse Spark Open"], ["Storyboard", "3–7 scenes you review · Muse Spark Open"],
   ["Script", "Local-language lines · Muse Spark Open"], ["Keyframe", "Muse Image 1.0 photoreal UGC stills"],
   ["Voice", "YarnGPT2 / MMS (H3 native for English)"], ["Video", "MiniMax H3 primary on Modal"],
-  ["Critic", "Muse Spark scores every scene"], ["Final", "25–40s captioned UGC video"],
+  ["Critic", "Muse Spark scores every scene"], ["Film", "25–40s captioned UGC video + AI label"],
+  ["Export for Posting", "Caption + hashtags, ready to copy & post yourself"],
 ];
 // Stays in sync with MODEL_MAP in worker/src/index.js (also served at /api/health).
 const MODEL_BADGES = { research: "Muse Spark Open (Baseten)", storyboard: "Muse Spark Open (Baseten)",
@@ -108,6 +109,8 @@ function Studio({ go }) {
   const [error, setError] = useState("");
   const [credits, setCredits] = useState(null);
   const [health, setHealth] = useState(null);
+  const [pkg, setPkg] = useState(null);
+  const [copied, setCopied] = useState("");
 
   const refreshCredits = () => api("/api/credits").then(setCredits).catch(() => {});
   useEffect(() => { refreshCredits(); api("/api/health").then(setHealth).catch(() => {}); }, []);
@@ -125,8 +128,20 @@ function Studio({ go }) {
     const out = await api(`/api/projects/${project.id}/keyframes`, { method: "POST", body: JSON.stringify({ persona: form.persona }) });
     setFrames(out.keyframes || []);
   });
+  const buildExport = () => run("export", async () => {
+    const out = await api(`/api/projects/${project.id}/export`, { method: "POST", body: JSON.stringify({ job_id: job?.id }) });
+    setPkg(out.posting_package);
+  });
+  const copyText = async (label, text) => { try { await navigator.clipboard.writeText(text); setCopied(label); } catch { setError("Copy failed — select the text and copy manually."); } };
+  const downloadPkg = () => {
+    const pp = job?.posting_package || pkg; if (!pp) return;
+    const text = `TALLA POSTING PACKAGE\nProduct: ${form.name || "—"} · Language: ${pp.language}\nVideo: ${pp.video_url || "see Studio job (Modal volume until R2 keys are set)"}\n\nCAPTION\n${pp.caption}\n\nHASHTAGS\n${(pp.hashtags || []).join(" ")}\n\nCHECKLIST\n${(pp.checklist || []).map((x) => "☐ " + x).join("\n")}\n`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    a.download = "talla-posting-package.txt"; a.click(); URL.revokeObjectURL(a.href);
+  };
 
-  const crumbs = ["Product", "Research", "Storyboard", "Script", "Generate"];
+  const crumbs = ["Product", "Research", "Storyboard", "Script", "Generate", "Export"];
   const active = !project ? 0 : job ? 4 : project.script ? 3 : project.storyboard ? 2 : project.research ? 1 : 0;
 
   return (<div className="wrap studio">
@@ -266,6 +281,24 @@ function Studio({ go }) {
           {job.final_video_url && !String(job.final_video_url).startsWith("modal-volume://") && <video controls src={job.final_video_url} />}
           {String(job.final_video_url || "").startsWith("modal-volume://") && <p className="hint">Final video in Modal volume: {job.final_video_url} (public playback unlocks when R2 keys are set)</p>}
         </>}
+      </div>}
+
+      {project.script && <div className="panel"><h3>6. Export for Posting <span className="pill demo">optional</span></h3>
+        <p className="hint">After your video is stitched with the AI-generated label, we prepare a ready-to-post package: a caption in your video&apos;s language ({project.language}) plus 5–8 hashtags. No auto-posting — copy it and post it yourself. <span className="pill">{health?.models?.export || "Muse Spark Open (Baseten)"}</span></p>
+        <button className="btn" disabled={!!busy} onClick={buildExport}>{busy === "export" ? "Preparing package…" : (pkg || job?.posting_package) ? "Refresh posting package" : "Prepare posting package"}</button>
+        {(job?.posting_package || pkg) && (() => { const pp = job?.posting_package || pkg; const full = pp.caption + "\n\n" + (pp.hashtags || []).join(" "); return (
+          <div className="scene" style={{ marginTop: 12 }}>
+            <b>Posting package</b> <span className="pill">{pp.language}</span> {pp.mode === "demo" && <span className="pill demo">demo</span>}
+            <p style={{ whiteSpace: "pre-wrap" }}>{pp.caption}</p>
+            <p>{(pp.hashtags || []).map((h) => <span className="pill" key={h}>{h}</span>)}</p>
+            <p className="hint">Video: {pp.video_url || "your finished video (Studio job above)"}</p>
+            {(pp.checklist || []).map((x) => <p className="hint" key={x}>☐ {x}</p>)}
+            {pp.note && <p className="hint">{pp.note}</p>}
+            <button className="btn small" onClick={() => copyText("caption", pp.caption)}>{copied === "caption" ? "Copied ✓" : "Copy caption"}</button>{" "}
+            <button className="btn small ghost" onClick={() => copyText("tags", (pp.hashtags || []).join(" "))}>{copied === "tags" ? "Copied ✓" : "Copy hashtags"}</button>{" "}
+            <button className="btn small ghost" onClick={() => copyText("full", full)}>{copied === "full" ? "Copied ✓" : "Copy caption + hashtags"}</button>{" "}
+            <button className="btn small ghost" onClick={downloadPkg}>Download package (.txt)</button>
+          </div>); })()}
       </div>}
     </>}
   </div>);

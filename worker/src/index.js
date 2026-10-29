@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { researchAgent, storyboardAgent, scriptAgent, criticAgent, LANGUAGES } from "./agents.js";
+import { researchAgent, storyboardAgent, scriptAgent, criticAgent, exportAgent, LANGUAGES } from "./agents.js";
 import { creditSummary, LIMITS, charge, cacheGet, cacheSet, cacheKey, assertBudget } from "./credits.js";
 import { has, modalCall, modalJobCall, museImage } from "./providers.js";
 import { PERSONAS, DEFAULT_PERSONA_ID, getPersona, voiceRoute, H3_NATIVE_AUDIO_LANGS } from "./personas.js";
@@ -44,6 +44,7 @@ export const MODEL_MAP = {
   video: { h3: "MiniMax H3 (Modal H100)", wan: "Wan 2.2 (Modal)", ltx: "LTX (Modal)" },
   critic: "Muse Spark Open (Baseten)",
   stitch: "ffmpeg composite (Modal)",
+  export: "Muse Spark Open (Baseten)",
 };
 
 app.get("/api/health", (c) => c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["h3", "wan", "ltx"], models: MODEL_MAP, personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
@@ -274,8 +275,32 @@ app.post("/api/projects/:pid/generate", async (c) => {
     job.note = "Generation stopped — see error. Completed scenes are kept above.";
   }
   p.status = job.status === "complete" ? "generated" : p.status;
+  // Optional final step: attach a ready-to-post export package (caption in
+  // the video's language + hashtags + video ref). Best-effort — a caption
+  // failure must never fail a completed film. Also available standalone at
+  // POST /api/projects/:pid/export for manual/copy-only use.
+  if (job.status === "complete") {
+    try { job.posting_package = await exportAgent(env, p, job); } catch {}
+  }
   await saveProject(env, p);
   return c.json(job, 201);
+});
+
+// Export for Posting (standalone, optional): build/refresh the posting
+// package for the latest job without regenerating any media. Works in demo
+// mode too — the caption/hashtags are prepared from script + research, the
+// user copies and posts manually (no social APIs, no auto-posting).
+app.post("/api/projects/:pid/export", async (c) => {
+  const p = await getProject(c.env, c.req.param("pid"));
+  if (!p) return c.json({ error: "Project not found" }, 404);
+  if (!p.script) return c.json({ error: "Run script first — the export caption is written from your script." }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const job = body.job_id ? mem.jobs.get(body.job_id) : [...mem.jobs.values()].filter((j) => j.project_id === p.id).pop();
+  try {
+    const pkg = await exportAgent(c.env, p, job);
+    if (job) job.posting_package = pkg;
+    return c.json({ project_id: p.id, job_id: job?.id || null, posting_package: pkg });
+  } catch (e) { return c.json({ error: `export failed: ${e.message}` }, 502); }
 });
 
 // Voice preview: hear the persona's local voice on one line BEFORE filming,

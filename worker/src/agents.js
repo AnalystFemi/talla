@@ -86,6 +86,38 @@ export async function scriptAgent(env, project) {
   return { mode: "live", ...out };
 }
 
+export async function exportAgent(env, project, job) {
+  // Export for Posting (final lightweight step, optional): after stitch +
+  // AI label, prepare a ready-to-post package — caption in the video's own
+  // language + 5–8 hashtags (local + general mix). NO social APIs, no
+  // auto-posting: the user copies and posts manually. Demo fallback keeps
+  // the flow testable with zero credits.
+  const lang = project.language || project.script?.language || "pidgin";
+  const hook = project.research?.hooks?.[0] || project.storyboard?.scenes?.[0]?.key_line || project.name;
+  const lines = (project.script?.lines || []).map((l) => l.text);
+  if (!has(env, "BASETEN_API_KEY")) {
+    const caption = `${hook}\n\n${(lines[lines.length - 1] || project.name || "")}\n#NaijaBusiness #SmallBusinessNigeria #UGC`;
+    return { mode: "demo", language: lang,
+      caption,
+      hashtags: ["#NaijaBusiness", "#SmallBusinessNigeria", "#UGC", "#Nigeria", "#SupportSmallBusiness", "#EntrepreneurNigeria"],
+      video_url: job?.final_video_url || null, video_volume_path: job?.final_volume_path || null,
+      checklist: ["Video carries the AI-generated label", "Copy the caption + hashtags", "Post manually on TikTok / Reels / Shorts", "Turn on the platform AI-content label when posting"],
+      note: "Demo export — connect Baseten for a Muse Spark caption in your language." };
+  }
+  assertBudget("baseten");
+  const out = await basetenChat(env, [
+    { role: "system", content: `You are Talla's Export assistant. Write a ready-to-post social caption for a Nigerian UGC video. Return ONLY JSON {caption, hashtags:[5-8 strings starting with #]}. The caption MUST be written in ${lang} exactly as a Nigerian creator would write it (same language as the spoken script). Caption: short hook first line, 1-2 value lines, one clear call to action, 0-2 natural emojis, line breaks allowed. Hashtags: mix Nigerian/local audience tags with general UGC/small-business tags, relevant to the product and category, no spam, no fake claims, no invented prices or discounts.` },
+    { role: "user", content: `Product: ${project.name} — ${project.description}\nCategory: ${project.category}\nAudience: ${project.audience}\nLanguage: ${lang}\nSpoken script lines: ${lines.join(" | ")}\nTop hook: ${hook}` },
+  ]);
+  await charge(env, "baseten", "export", project.id);
+  const hashtags = (out.hashtags || []).filter((h) => String(h).startsWith("#")).slice(0, 8);
+  return { mode: "live", language: lang,
+    caption: out.caption || hook,
+    hashtags: hashtags.length ? hashtags : ["#NaijaBusiness", "#SmallBusinessNigeria", "#UGC"],
+    video_url: job?.final_video_url || null, video_volume_path: job?.final_volume_path || null,
+    checklist: ["Video carries the AI-generated label", "Copy the caption + hashtags", "Post manually on TikTok / Reels / Shorts", "Turn on the platform AI-content label when posting"] };
+}
+
 export async function criticAgent(env, project, scene, attempt) {
   // Critic gate (brief §5/§6): reject plastic skin, bad lip-sync, wrong
   // product, unnatural local speech. Max retries enforced by LIMITS.
