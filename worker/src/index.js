@@ -31,7 +31,22 @@ async function getProject(env, pid) {
   return null;
 }
 
-app.get("/api/health", (c) => c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["h3", "wan", "ltx"], personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
+// Hackathon model map (brief §2): Meta Muse does the visible, verifiable
+// work — brain, keyframes, critic. H3 renders picture; local open voice
+// speaks the Nigerian languages. The Studio shows these as per-stage
+// badges so judges can see exactly which model did what.
+export const MODEL_MAP = {
+  research: "Muse Spark Open (Baseten)",
+  storyboard: "Muse Spark Open (Baseten)",
+  script: "Muse Spark Open (Baseten)",
+  keyframe: "Muse Image 1.0 (Meta)",
+  voice: "YarnGPT2 / MMS (Modal, open)",
+  video: { h3: "MiniMax H3 (Modal H100)", wan: "Wan 2.2 (Modal)", ltx: "LTX (Modal)" },
+  critic: "Muse Spark Open (Baseten)",
+  stitch: "ffmpeg composite (Modal)",
+};
+
+app.get("/api/health", (c) => c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["h3", "wan", "ltx"], models: MODEL_MAP, personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
   providers: { baseten: has(c.env, "BASETEN_API_KEY"), meta: has(c.env, "META_API_KEY"),
     firecrawl: has(c.env, "FIRECRAWL_API_KEY"), exa: has(c.env, "EXA_API_KEY"),
     modal_tts: has(c.env, "MODAL_TTS_ENDPOINT"), modal_yarn: has(c.env, "MODAL_YARN_ENDPOINT"),
@@ -110,6 +125,51 @@ async function speakLocal(env, EP, { text, language, persona }) {
   return null; // h3-native: no local track needed
 }
 
+// One Muse Image still for one scene (persona-locked; cached so the same
+// scene prompt is never paid for twice). Shared by /keyframes and by
+// /generate, which auto-creates any missing still so a live run can never
+// silently bypass Muse Image (hackathon: Meta must be visibly in the flow).
+async function keyframeForScene(env, p, persona, scene) {
+  const prompt = `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, visible skin pores, natural imperfections, natural light. ${scene.visual}. Product: ${p.name} — ${p.description}. Shot: ${scene.shot}. NOT plastic skin, NOT airbrushed, NOT CGI, no beauty filter, vertical 9:16.`;
+  const key = cacheKey("keyframe", prompt);
+  let url = cacheGet(key);
+  if (url) { await charge(env, "meta", "muse_image", p.id, { cached: true }); return { url, cached: true }; }
+  assertBudget("meta");
+  try {
+    url = await museImage(env, prompt);
+  } catch (e) {
+    // Muse's filter occasionally rejects scene wording — retry once
+    // with a sanitised generic UGC prompt (same product, safe framing).
+    if (!String(e.message).includes("content_policy")) throw e;
+    url = await museImage(env,
+      `Raw candid iPhone selfie photo of a Nigerian creator smiling and talking to camera in a bright everyday indoor setting, holding a product package, visible skin pores, natural light, vertical 9:16. Product: ${p.name}. NOT plastic skin, NOT airbrushed, NOT CGI.`);
+  }
+  cacheSet(key, url);
+  await charge(env, "meta", "muse_image", p.id);
+  return { url, cached: false };
+}
+
+// Ensures every scene in `scenes` has a Muse Image still on the project.
+// Returns { created:number[], reused:number[], error:string|null }.
+// A failure never throws — /generate records it and H3 falls back to its
+// anchor frame, with the gap honestly flagged on the job.
+async function ensureKeyframes(env, p, persona, scenes) {
+  const out = { created: [], reused: [], error: null };
+  if (!has(env, "META_API_KEY")) { out.error = "META_API_KEY not set — Muse Image keyframes skipped (H3 anchor frame used)."; return out; }
+  try {
+    const frames = [...(p.keyframes || [])];
+    for (const s of scenes) {
+      if (frames.some((f) => f.scene === s.n)) { out.reused.push(s.n); continue; }
+      const { url } = await keyframeForScene(env, p, persona, s);
+      frames.push({ scene: s.n, keyframe_url: url });
+      out.created.push(s.n);
+    }
+    p.keyframes = frames;
+    await saveProject(env, p);
+  } catch (e) { out.error = `Muse Image keyframes failed (${e.message}) — H3 anchor frame used for affected scenes.`; }
+  return out;
+}
+
 app.post("/api/projects/:pid/generate", async (c) => {
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
@@ -123,6 +183,9 @@ app.post("/api/projects/:pid/generate", async (c) => {
   const live = engine === "h3" ? Boolean(EP.h3) : Boolean(EP.wan);
   const nativeAudio = H3_NATIVE_AUDIO_LANGS.has((p.language || "").toLowerCase());
   const job = { id: id(), project_id: p.id, stage: "generate", engine, persona: persona.id,
+    models: { research: MODEL_MAP.research, storyboard: MODEL_MAP.storyboard, script: MODEL_MAP.script,
+      keyframe: MODEL_MAP.keyframe, voice: nativeAudio && engine === "h3" ? "MiniMax H3 native dialogue" : MODEL_MAP.voice,
+      video: MODEL_MAP.video[engine] || MODEL_MAP.video.h3, critic: MODEL_MAP.critic, stitch: MODEL_MAP.stitch },
     audio_plan: nativeAudio && engine === "h3" ? "h3-native" : "local-voice",
     status: "running", progress: 10, scenes: [] };
   mem.jobs.set(job.id, job);
@@ -131,6 +194,10 @@ app.post("/api/projects/:pid/generate", async (c) => {
   const scenes = body.limit ? allScenes.slice(0, body.limit) : allScenes;
   const clipPaths = [], audioPaths = [];
   try {
+    // 0) Muse Image keyframes first: every live run must show Meta in the
+    //    flow, so missing stills are created here even if the user never
+    //    pressed "Generate keyframes" in the Studio.
+    job.models.keyframe_status = live ? await ensureKeyframes(env, p, persona, scenes) : { created: [], reused: [], error: null };
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i];
       const line = p.script?.lines?.[i] || { text: scene.key_line, seconds: scene.seconds };
@@ -237,8 +304,10 @@ app.post("/api/projects/:pid/voice-preview", async (c) => {
   } catch (e) { return c.json({ error: e.message }, 502); }
 });
 
-// Keyframes: one Muse Image still per storyboard scene (brief SS6).
-// Cached — regenerating the same scene prompt costs $0.
+// Keyframes: one Muse Image still per storyboard scene (brief §6).
+// Cached — regenerating the same scene prompt costs $0. This endpoint lets
+// the user preview stills before filming; /generate also calls
+// ensureKeyframes itself, so previewing is optional, never required.
 app.post("/api/projects/:pid/keyframes", async (c) => {
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
@@ -247,34 +316,10 @@ app.post("/api/projects/:pid/keyframes", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const persona = getPersona(body.persona || p.persona || DEFAULT_PERSONA_ID);
   p.persona = persona.id;
-  const scenes = p.storyboard.scenes.filter((s) => !body.scene || s.n === body.scene);
-  const frames = [];
-  try {
-    for (const s of scenes) {
-      // Persona-locked face: same person in every scene, matching the voice.
-      const prompt = `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, visible skin pores, natural imperfections, natural light. ${s.visual}. Product: ${p.name} — ${p.description}. Shot: ${s.shot}. NOT plastic skin, NOT airbrushed, NOT CGI, no beauty filter, vertical 9:16.`;
-      const key = cacheKey("keyframe", prompt);
-      let url = cacheGet(key);
-      if (url) { await charge(c.env, "meta", "muse_image", p.id, { cached: true }); }
-      else {
-        assertBudget("meta");
-        try {
-          url = await museImage(c.env, prompt);
-        } catch (e) {
-          // Muse's filter occasionally rejects scene wording — retry once
-          // with a sanitised generic UGC prompt (same product, safe framing).
-          if (!String(e.message).includes("content_policy")) throw e;
-          url = await museImage(c.env,
-            `Raw candid iPhone selfie photo of a Nigerian creator smiling and talking to camera in a bright everyday indoor setting, holding a product package, visible skin pores, natural light, vertical 9:16. Product: ${p.name}. NOT plastic skin, NOT airbrushed, NOT CGI.`);
-        }
-        cacheSet(key, url);
-        await charge(c.env, "meta", "muse_image", p.id);
-      }
-      frames.push({ scene: s.n, keyframe_url: url });
-    }
-  } catch (e) { return c.json({ error: `keyframes failed: ${e.message}` }, 502); }
-  p.keyframes = frames; await saveProject(c.env, p);
-  return c.json({ project_id: p.id, keyframes: frames });
+  const wanted = body.scene ? p.storyboard.scenes.filter((s) => s.n === body.scene) : p.storyboard.scenes;
+  const status = await ensureKeyframes(c.env, p, persona, wanted);
+  if (status.error) return c.json({ error: status.error }, 502);
+  return c.json({ project_id: p.id, keyframes: p.keyframes });
 });
 
 app.get("/api/jobs/:jid", (c) => {

@@ -4,16 +4,20 @@ const API = "";
 const AGENTS = [
   { key: "researcher", name: "Researcher", img: "/agents/researcher.webp", color: "Blue", job: "Analyses trends, competitors and what Nigerian buyers actually want" },
   { key: "scriptwriter", name: "Scriptwriter", img: "/agents/scriptwriter.webp", color: "Orange", job: "Writes hooks and scripts in Pidgin, Yoruba, Hausa, Igbo & Nigerian English" },
-  { key: "voice", name: "Voice", img: "/agents/voice.webp", color: "Pink", job: "Speaks your script with open Nigerian TTS — SoroTTS / WazobiaVoice on Modal" },
-  { key: "critic", name: "Critic", img: "/agents/critic.webp", color: "Green", job: "Quality gate — rejects plastic skin, bad lip-sync and unnatural speech" },
+  { key: "voice", name: "Voice", img: "/agents/voice.webp", color: "Pink", job: "Speaks your script with open Nigerian TTS — YarnGPT2 / MMS on Modal" },
+  { key: "critic", name: "Critic", img: "/agents/critic.webp", color: "Green", job: "Quality gate — Muse Spark scores every scene for realism and natural speech" },
   { key: "editor", name: "Editor", img: "/agents/editor.webp", color: "Purple", job: "Stitches clips, burns captions, adds the AI-generated label, final polish" },
 ];
 const PIPELINE = [
-  ["Research", "Pain points, hooks, formats, language"], ["Storyboard", "3–7 scenes you review & edit"],
-  ["Script", "Local-language lines per scene"], ["Keyframe", "Muse Image photoreal UGC stills"],
-  ["Voice", "Open Nigerian TTS on Modal"], ["Video", "MiniMax H3 primary on Modal"],
-  ["Critic", "Muse Spark rejects bad takes"], ["Final", "25–40s captioned UGC video"],
+  ["Research", "Pain points, hooks, formats · Muse Spark Open"], ["Storyboard", "3–7 scenes you review · Muse Spark Open"],
+  ["Script", "Local-language lines · Muse Spark Open"], ["Keyframe", "Muse Image 1.0 photoreal UGC stills"],
+  ["Voice", "YarnGPT2 / MMS (H3 native for English)"], ["Video", "MiniMax H3 primary on Modal"],
+  ["Critic", "Muse Spark scores every scene"], ["Final", "25–40s captioned UGC video"],
 ];
+// Stays in sync with MODEL_MAP in worker/src/index.js (also served at /api/health).
+const MODEL_BADGES = { research: "Muse Spark Open (Baseten)", storyboard: "Muse Spark Open (Baseten)",
+  script: "Muse Spark Open (Baseten)", keyframe: "Muse Image 1.0 (Meta)", voice: "YarnGPT2 / MMS (Modal)",
+  video: "MiniMax H3 (Modal)", critic: "Muse Spark Open (Baseten)", stitch: "ffmpeg composite (Modal)" };
 const LANGS = ["pidgin", "yoruba", "hausa", "igbo", "nigerian-english"];
 const PERSONAS = [
   { id: "female-creator", label: "Female creator", blurb: "Woman, late 20s, braids — voice: Idera (YarnGPT2)" },
@@ -62,7 +66,7 @@ function Home({ go }) {
         </div></section>
 
       <section id="team"><h2>Meet your team</h2>
-        <p className="sub">Five specialists that hand work to each other — like a Riverside studio crew, but for UGC adverts. Talla means “advertisement” in Hausa.</p>
+        <p className="sub">Five specialists that hand work to each other — like a Riverside studio crew, but for UGC adverts. Talla means “advertisement” in Hausa. Under the hood: Muse Spark Open plans, Muse Image 1.0 shoots the stills, MiniMax H3 films, Muse Spark critic-scores every scene.</p>
         <div className="grid">{AGENTS.map((a) => (
           <div className="card" key={a.key}><img src={a.img} alt={a.name} /><h3>{a.name}</h3><p>{a.job}</p></div>))}
         </div></section>
@@ -165,14 +169,15 @@ function Studio({ go }) {
     {project && <>
       <div className="panel"><h3>2. Research brief</h3>
         <div className="agents-row"><span className={"agent-chip" + (busy === "research" ? " working" : "")}>
-          <img src="/agents/researcher.webp" alt="" /> Researcher {project.research?.mode === "demo" && <span className="pill demo">demo</span>}</span></div>
+          <img src="/agents/researcher.webp" alt="" /> Researcher {project.research?.mode === "demo" && <span className="pill demo">demo</span>}</span>
+          <span className="pill">{health?.models?.research || MODEL_BADGES.research}</span></div>
         {!project.research
           ? <button className="btn" disabled={!!busy} onClick={() => stage("research")}>{busy === "research" ? "Researching…" : "Run research"}</button>
           : <pre>{JSON.stringify(project.research, null, 2)}</pre>}
       </div>
 
       {project.research && <div className="panel"><h3>3. Storyboard — review before we film</h3>
-        <p className="hint">This is your plan of the video. Edit any scene, then approve it. Nothing expensive runs until you do.</p>
+        <p className="hint">This is your plan of the video. Edit any scene, then approve it. Nothing expensive runs until you do. <span className="pill">{health?.models?.storyboard || MODEL_BADGES.storyboard}</span></p>
         {!project.storyboard
           ? <button className="btn" disabled={!!busy} onClick={() => stage("storyboard")}>{busy === "storyboard" ? "Storyboarding…" : "Create storyboard"}</button>
           : <>{project.storyboard.scenes.map((s, i) => (
@@ -184,7 +189,9 @@ function Studio({ go }) {
       {project.storyboard && <div className="panel"><h3>4. Script in {project.language}</h3>
         <div className="agents-row"><span className={"agent-chip" + (busy === "script" ? " working" : "")}>
           <img src="/agents/scriptwriter.webp" alt="" /> Scriptwriter</span>
-          <span className="agent-chip"><img src="/agents/voice.webp" alt="" /> Voice (Modal TTS)</span></div>
+          <span className="pill">{health?.models?.script || MODEL_BADGES.script}</span>
+          <span className="agent-chip"><img src="/agents/voice.webp" alt="" /> Voice</span>
+          <span className="pill">{health?.models?.voice || MODEL_BADGES.voice}</span></div>
         {!project.script
           ? <button className="btn" disabled={!!busy} onClick={() => stage("script")}>{busy === "script" ? "Writing…" : "Write script"}</button>
           : <pre>{JSON.stringify(project.script, null, 2)}</pre>}
@@ -199,9 +206,9 @@ function Studio({ go }) {
           {project.script && <div className="bubble"><img src="/agents/voice.webp" alt="" /><div className="msg"><b>Voice</b>
             Script written in {project.script.language}. I will speak it with open Nigerian TTS on Modal.</div></div>}
           {frames.length > 0 && <div className="bubble"><img src="/agents/editor.webp" alt="" /><div className="msg"><b>Editor</b>
-            {frames.length} keyframe{frames.length > 1 ? "s" : ""} generated with Muse Image. Ready to animate.</div></div>}
+            {frames.length} Muse Image keyframe{frames.length > 1 ? "s" : ""} ready. Hit Generate video — any missing still is created automatically inside the run.</div></div>}
           {job && <div className="bubble"><img src="/agents/critic.webp" alt="" /><div className="msg"><b>Critic</b>
-            Checked {job.scenes?.length || 0} scenes on the {job.engine} engine. Verdicts are listed below — nothing plastic passed me.</div></div>}
+            Checked {job.scenes?.length || 0} scenes on the {job.engine} engine ({health?.models?.critic || MODEL_BADGES.critic}). Per-scene verdicts are listed below.</div></div>}
           {!project.research && <p className="hint">Your team is waiting. Run research and their updates will appear here.</p>}
         </div></div>}
 
@@ -214,6 +221,12 @@ function Studio({ go }) {
           <option value="wan">Wan 2.2 — image-to-video fallback (Modal)</option>
           <option value="ltx">LTX — fallback floor (Modal)</option>
         </select>
+        <div className="credits-bar" style={{ marginTop: 10 }}>
+          <span className="credit-chip">Keyframe · {health?.models?.keyframe || MODEL_BADGES.keyframe}</span>
+          <span className="credit-chip">Video · {engine === "h3" ? "MiniMax H3 (Modal H100)" : engine === "wan" ? "Wan 2.2 (Modal)" : "LTX (Modal)"}</span>
+          <span className="credit-chip">Critic · {health?.models?.critic || MODEL_BADGES.critic}</span>
+          <span className="credit-chip">Stitch · {health?.models?.stitch || MODEL_BADGES.stitch}</span>
+        </div>
         <p className="hint">How voice works: Nigerian English keeps H3&apos;s own synced voice. Pidgin / Yoruba / Hausa / Igbo use our local Nigerian voice (YarnGPT2 / MMS) — generated first, then swapped onto H3&apos;s picture at stitch, so the words are exactly your script, spoken by your chosen creator.</p>
         <button className="btn ghost" disabled={!!busy} onClick={previewVoice}>{busy === "voice" ? "Voicing…" : "▶ Preview my creator's voice"}</button>
         {voicePreview && <div className="scene"><b>Voice preview</b> <span className="pill">{voicePreview.engine} · {voicePreview.voice || "fixed speaker"}</span>
@@ -222,16 +235,25 @@ function Studio({ go }) {
           {voicePreview.audio_url && !String(voicePreview.audio_url).startsWith("modal-volume://") && <audio controls src={voicePreview.audio_url} />}
           {String(voicePreview.audio_url || "").startsWith("modal-volume://") && <p className="hint">Voice generated into the Modal volume ({voicePreview.audio_url}) — public playback unlocks when R2 keys are set.</p>}
         </div>}
-        <br /><br />
-        <button className="btn" disabled={!!busy} onClick={keyframes}>{busy === "keyframes" ? "Generating keyframes…" : "1. Generate keyframes (Muse Image)"}</button>{" "}
-        <button className="btn accent" disabled={!!busy} onClick={generate}>{busy === "generate" ? "Your team is filming…" : "2. Generate video"}</button>
+        <p className="hint">Keyframes are automatic: every live video run first asks Muse Image 1.0 for any missing still, so Meta is in every film. Preview them below if you want to approve the face first.</p>
+        <button className="btn" disabled={!!busy} onClick={keyframes}>{busy === "keyframes" ? "Generating keyframes…" : "Preview keyframes (Muse Image)"}</button>{" "}
+        <button className="btn accent" disabled={!!busy} onClick={generate}>{busy === "generate" ? "Your team is filming…" : "Generate video"}</button>
         {frames.length > 0 && <div>{frames.map((f) => (
-          <div className="scene" key={f.scene}><b>Scene {f.scene} keyframe</b>
+          <div className="scene" key={f.scene}><b>Scene {f.scene} keyframe</b> <span className="pill">Muse Image 1.0 (Meta)</span>
             <img className="keyframe" src={f.keyframe_url} alt={`Scene ${f.scene} keyframe`} /></div>))}
         </div>}
         {job && <><br /><br />
           <span className="pill pass">Job {job.id} — {job.status} ({job.progress}%)</span>{" "}
           <span className="pill demo">engine: {job.engine}</span>
+          {job.models && <div className="credits-bar" style={{ marginTop: 10 }}>
+            <span className="credit-chip">Brain · {job.models.script}</span>
+            <span className="credit-chip">Keyframe · {job.models.keyframe}</span>
+            <span className="credit-chip">Voice · {job.models.voice}</span>
+            <span className="credit-chip">Video · {job.models.video}</span>
+            <span className="credit-chip">Critic · {job.models.critic}</span>
+          </div>}
+          {job.models?.keyframe_status?.created?.length > 0 && <p className="hint">Muse Image created {job.models.keyframe_status.created.length} keyframe(s) inside this run (scenes {job.models.keyframe_status.created.join(", ")}) — no manual step needed.</p>}
+          {job.models?.keyframe_status?.error && <p className="hint">⚠ {job.models.keyframe_status.error}</p>}
           <p className="hint" style={{ marginTop: 12 }}>{job.note}</p>
           {job.scenes?.map((s) => <div className="scene" key={s.scene}><b>Scene {s.scene}</b>{" "}
             <span className="pill pass">critic: {s.critic?.verdict} ({s.critic?.score}/10)</span>{" "}
