@@ -20,7 +20,7 @@ image = (
                     "librosa==0.9.2", "scipy", "kornia==0.6.12", "face-alignment", "yacs", "pyyaml",
                     "facexlib==0.3.0", "gfpgan==1.3.8", "basicsr==1.4.2", "realesrgan", "av", "tqdm",
                     "opencv-python-headless", "imageio", "imageio-ffmpeg", "resampy",
-                    "pydub", "ffmpeg-python", "safetensors", "einops")
+                    "pydub", "ffmpeg-python", "safetensors", "einops", "fastapi[standard]")
     .run_commands(
         "git clone --depth 1 https://github.com/OpenTalker/SadTalker /opt/SadTalker",
     )
@@ -40,13 +40,19 @@ class LipSync:
         -> {clip_url, engine, mode}. Audio is muxed untouched."""
         import base64, subprocess, time, requests, glob, os
         from r2 import upload_to_r2
+        outputs.reload()  # warm containers otherwise see a stale volume view
 
-        def materialize(b64, url, path):
+        def materialize(b64, url, path, volume_path=None):
+            if volume_path:  # shared talla-outputs volume: no HTTP transit
+                import shutil
+                shutil.copy(f"/outputs/{volume_path}", path)
+                return
             data = base64.b64decode(b64) if b64 else requests.get(url, timeout=120).content
             open(path, "wb").write(data)
 
         materialize(payload.get("keyframe_b64"), payload.get("keyframe_url"), "/tmp/face.jpg")
-        materialize(payload.get("audio_b64"), payload.get("audio_url"), "/tmp/voice.wav")
+        materialize(payload.get("audio_b64"), payload.get("audio_url"), "/tmp/voice.wav",
+                    payload.get("audio_volume_path"))
         result_dir = "/tmp/sadtalker_out"
         ckpt = "/model_weights/SadTalker"
         if not os.path.exists(os.path.join(ckpt, "SadTalker_V0.0.2_256.safetensors")):
@@ -65,9 +71,33 @@ class LipSync:
             return {"error": "SadTalker produced no mp4", "log": (run.stdout + run.stderr)[-1500:], "mode": "error"}
         out = f"/outputs/lipsync_{int(time.time())}.mp4"
         subprocess.run(["cp", videos[-1], out], check=True)
-        url = upload_to_r2(out, f"clips/lipsync_{int(time.time())}.mp4")
+        import os
+        url = upload_to_r2(out, f"clips/{os.path.basename(out)}")
         outputs.commit()
         return {"clip_url": url, "engine": "sadtalker", "mode": "live"}
+
+
+@app.function(image=image, timeout=120)
+@modal.fastapi_endpoint(method="POST")
+def animate_http(payload: dict) -> dict:
+    """Async spawn (GPU jobs exceed HTTP gateway timeouts):
+    POST {keyframe_b64|url, audio_b64|url} -> {call_id, status}"""
+    call = LipSync().animate.spawn(payload)
+    return {"call_id": call.object_id, "status": "running"}
+
+
+@app.function(image=image, timeout=60)
+@modal.fastapi_endpoint(method="GET")
+def animate_result(call_id: str) -> dict:
+    """Poll a spawned lip-sync job: GET ?call_id=... -> {status, ...result}"""
+    call = modal.functions.FunctionCall.from_id(call_id)
+    try:
+        result = call.get(timeout=0)
+        return {"status": "complete", **(result or {})}
+    except TimeoutError:
+        return {"status": "running"}
+    except Exception as e:
+        return {"status": "error", "error": f"{type(e).__name__}: {str(e)[:400]}"}
 
 
 @app.local_entrypoint()

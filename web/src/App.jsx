@@ -94,7 +94,7 @@ function Studio({ go }) {
   const [project, setProject] = useState(null);
   const [job, setJob] = useState(null);
   const [frames, setFrames] = useState([]);
-  const [engine, setEngine] = useState("h3");
+  const [engine, setEngine] = useState("liveportrait");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [credits, setCredits] = useState(null);
@@ -198,9 +198,9 @@ function Studio({ go }) {
           <span key={a.key} className={"agent-chip" + (busy === "generate" ? " working" : "")}><img src={a.img} alt="" />{a.name}</span>))}</div>
         <label>Video engine (all on Modal cloud GPU — nothing renders on your machine)</label>
         <select value={engine} onChange={(e) => setEngine(e.target.value)}>
-          <option value="h3">MiniMax H3 — primary (self-hosted, Modal)</option>
-          <option value="wan">Wan 2.2 — secondary (Modal)</option>
-          <option value="liveportrait">LivePortrait — lip-sync guarantee (Modal)</option>
+          <option value="liveportrait">Lip-sync chain — keyframe + Nigerian voice (proven locally)</option>
+          <option value="h3">MiniMax H3 — cinematic (self-hosted, Modal, experimental)</option>
+          <option value="wan">Wan 2.2 — image-to-video (Modal)</option>
           <option value="ltx">LTX — fallback (Modal)</option>
         </select>
         <br /><br />

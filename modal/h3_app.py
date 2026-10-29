@@ -19,7 +19,7 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("ffmpeg")
     .uv_pip_install("torch==2.7.0", "diffusers>=0.35.0", "transformers>=4.51.0",
-                    "accelerate>=1.6.0", "huggingface-hub", "pillow", "boto3")
+                    "accelerate>=1.6.0", "huggingface-hub", "pillow", "boto3", "fastapi[standard]")
     .env({"HF_HOME": "/weights"})
     .add_local_python_source("r2")
 )
@@ -53,14 +53,38 @@ class H3Engine:
             f"Negative: plastic skin, airbrushed, CGI, beauty filter, watermark."
         )
         kwargs = {"prompt": prompt, "num_frames": 121}  # ~5s @24fps, 768p first
-        if payload.get("keyframe_url"):
-            kwargs["image"] = Image.open(io.BytesIO(requests.get(payload["keyframe_url"]).content)).convert("RGB")
+        if payload.get("keyframe_b64") or payload.get("keyframe_url"):
+            import base64
+            raw = base64.b64decode(payload["keyframe_b64"]) if payload.get("keyframe_b64") else requests.get(payload["keyframe_url"]).content
+            kwargs["image"] = Image.open(io.BytesIO(raw)).convert("RGB")
         frames = self.pipe(**kwargs).frames[0]
         raw = f"/outputs/h3_{int(time.time())}.mp4"
         export_to_video(frames, raw, fps=24)
-        url = upload_to_r2(raw, f"clips/h3_{int(time.time())}.mp4")
+        import os
+        url = upload_to_r2(raw, f"clips/{os.path.basename(raw)}")
         outputs.commit()
         return {"clip_url": url, "engine": "h3", "mode": "live"}
+
+
+@app.function(image=image, timeout=120)
+@modal.fastapi_endpoint(method="POST")
+def generate_http(payload: dict) -> dict:
+    """Async spawn (H3 cold starts exceed HTTP timeouts): -> {call_id}"""
+    call = H3Engine().generate.spawn(payload)
+    return {"call_id": call.object_id, "status": "running"}
+
+
+@app.function(image=image, timeout=60)
+@modal.fastapi_endpoint(method="GET")
+def generate_result(call_id: str) -> dict:
+    call = modal.functions.FunctionCall.from_id(call_id)
+    try:
+        result = call.get(timeout=0)
+        return {"status": "complete", **(result or {})}
+    except TimeoutError:
+        return {"status": "running"}
+    except Exception as e:
+        return {"status": "error", "error": f"{type(e).__name__}: {str(e)[:400]}"}
 
 
 @app.local_entrypoint()

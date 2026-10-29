@@ -5,24 +5,34 @@
 export function has(env, key) { return Boolean(env?.[key]); }
 
 export async function basetenChat(env, messages, { json = true } = {}) {
-  const res = await fetch(`${env.BASETEN_BASE_URL || "https://inference.baseten.co/v1"}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.BASETEN_API_KEY}` },
-    body: JSON.stringify({
-      model: env.BASETEN_MODEL || "meta-models/muse-spark-open-1026",
-      messages, temperature: 0.7, max_tokens: 2500,
-      ...(json ? { response_format: { type: "json_object" } } : {}),
-    }),
-  });
-  if (!res.ok) throw new Error(`Baseten ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  const msg = data.choices?.[0]?.message || {};
-  const text = msg.content || msg.reasoning_content || "{}";
-  if (!json) return text;
-  // Models often fence JSON in ```json blocks — strip before parsing.
-  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-  const start = cleaned.indexOf("{"), end = cleaned.lastIndexOf("}");
-  return JSON.parse(start >= 0 ? cleaned.slice(start, end + 1) : cleaned);
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const msgs = attempt === 1 ? messages : [
+      ...messages,
+      { role: "system", content: "IMPORTANT: Return ONLY valid JSON. Escape every double quote inside strings. No markdown, no commentary." },
+    ];
+    const res = await fetch(`${env.BASETEN_BASE_URL || "https://inference.baseten.co/v1"}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.BASETEN_API_KEY}` },
+      body: JSON.stringify({
+        model: env.BASETEN_MODEL || "meta-models/muse-spark-open-1026",
+        messages: msgs, temperature: attempt === 1 ? 0.7 : 0.3, max_tokens: 4000,
+        ...(json ? { response_format: { type: "json_object" } } : {}),
+      }),
+    });
+    if (!res.ok) throw new Error(`Baseten ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    const msg = data.choices?.[0]?.message || {};
+    const text = msg.content || msg.reasoning_content || "{}";
+    if (!json) return text;
+    try {
+      // Models often fence JSON in ```json blocks — strip before parsing.
+      const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+      const start = cleaned.indexOf("{"), end = cleaned.lastIndexOf("}");
+      return JSON.parse(start >= 0 ? cleaned.slice(start, end + 1) : cleaned);
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error(`Baseten returned invalid JSON after 3 attempts: ${lastErr?.message}`);
 }
 
 export async function firecrawlScrape(env, url) {
@@ -47,6 +57,25 @@ export async function exaSearch(env, query) {
   return (data.results || []).map((r) => ({ title: r.title, url: r.url, text: (r.text || "").slice(0, 800) }));
 }
 
+/** Async Modal job: POST spawns (returns {call_id}), then poll the paired
+ * result endpoint until complete. Required for multi-minute GPU work —
+ * Modal's HTTP gateway times out long synchronous requests. */
+export async function modalJobCall(spawnEndpoint, resultEndpoint, payload, { pollMs = 10000, timeoutMs = 1200000 } = {}) {
+  const spawn = await modalCall(spawnEndpoint, payload);
+  if (!spawn.call_id) return spawn; // sync-style endpoint, already the result
+  if (!resultEndpoint) throw new Error("Missing Modal result endpoint for async job");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const res = await fetch(`${resultEndpoint}?call_id=${encodeURIComponent(spawn.call_id)}`);
+    if (!res.ok) continue; // transient gateway blip while polling
+    const out = await res.json();
+    if (out.status === "complete") return out;
+    if (out.status === "error") throw new Error(out.error || "Modal job failed");
+  }
+  throw new Error(`Modal job timed out after ${Math.round(timeoutMs / 60000)} min (call ${spawn.call_id})`);
+}
+
 /** Muse Image 1.0 via Meta Model API (OpenAI-compatible). $0.01/image. */
 export async function museImage(env, prompt, { size = "1024x1536" } = {}) {
   const base = (env.META_BASE_URL || "https://api.meta.ai/v1").replace(/\/$/, "");
@@ -65,12 +94,27 @@ export async function museImage(env, prompt, { size = "1024x1536" } = {}) {
   return item.b64_json ? `data:image/webp;base64,${item.b64_json}` : item.url;
 }
 
-/** Ask a Modal web endpoint to do GPU work; returns parsed JSON. */
-export async function modalCall(endpoint, payload) {
-  const res = await fetch(endpoint, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error(`Modal ${res.status}: ${await res.text()}`);
-  return res.json();
+/** Ask a Modal web endpoint to do GPU work; returns parsed JSON.
+ * Retries transient gateway/cold-start failures (Modal endpoints can 5xx
+ * while a GPU container schedules). Business errors in the JSON body are
+ * returned by callers, not retried here beyond HTTP level. */
+export async function modalCall(endpoint, payload, attempts = 3) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) return res.json();
+      const body = await res.text();
+      if (res.status < 500 && res.status !== 429) throw new Error(`Modal ${res.status}: ${body}`);
+      lastErr = new Error(`Modal ${res.status}: ${body.slice(0, 200)}`);
+    } catch (e) {
+      if (e.message?.startsWith("Modal 4")) throw e;
+      lastErr = e;
+    }
+    if (i < attempts) await new Promise((r) => setTimeout(r, i * 5000));
+  }
+  throw lastErr || new Error("Modal call failed");
 }

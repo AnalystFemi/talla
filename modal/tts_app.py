@@ -28,7 +28,7 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("ffmpeg")
     .uv_pip_install("torch==2.7.0", "transformers>=4.51.0", "huggingface-hub",
-                    "soundfile", "boto3")
+                    "soundfile", "boto3", "fastapi[standard]")
     .env({"HF_HOME": "/weights"})
     .add_local_python_source("r2")
 )
@@ -56,12 +56,21 @@ class NigerianTTS:
         if language not in TTS_MODELS:
             return {"error": f"Unsupported language: {language}", "mode": "error"}
         out = self._pipe(language)(payload["text"])
+        import os
         path = f"/outputs/tts_{int(time.time())}.wav"
         sf.write(path, out["audio"], out["sampling_rate"])
-        url = upload_to_r2(path, f"audio/tts_{int(time.time())}.wav", "audio/wav")
+        # Key must reuse the SAME basename — downstream reads /outputs/<basename>.
+        url = upload_to_r2(path, f"audio/{os.path.basename(path)}", "audio/wav")
         outputs.commit()
         return {"audio_url": url, "engine": f"mms:{TTS_MODELS[language]}",
                 "language": language, "mode": "live"}
+
+
+@app.function(image=image, timeout=600)
+@modal.fastapi_endpoint(method="POST")
+def speak_http(payload: dict) -> dict:
+    """HTTP entry for the Cloudflare Worker: POST {text, language}"""
+    return NigerianTTS().speak.remote(payload)
 
 
 @app.local_entrypoint()

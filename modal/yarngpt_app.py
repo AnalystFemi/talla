@@ -67,7 +67,8 @@ class YarnGPT:
         audio = self.tok.get_audio(self.tok.get_codes(output))
         path = f"/outputs/yarn_{int(time.time())}.wav"
         torchaudio.save(path, audio, sample_rate=24000)
-        url = upload_to_r2(path, f"audio/yarn_{int(time.time())}.wav", "audio/wav")
+        import os
+        url = upload_to_r2(path, f"audio/{os.path.basename(path)}", "audio/wav")
         outputs.commit()
         return {"audio_url": url, "engine": "yarngpt2", "voice": voice,
                 "language": payload.get("language"), "mode": "live"}
