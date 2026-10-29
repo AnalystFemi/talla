@@ -128,7 +128,7 @@ export async function criticAgent(env, project, scene, attempt) {
   }
   assertBudget("baseten");
   const out = await basetenChat(env, [
-    { role: "system", content: "You are Talla's Critic. Return ONLY JSON {verdict:pass|reject, score:1-10, checks:{lip_sync,skin_realism,product_accuracy,language_naturalness}, note}. Reject plastic skin, bad lip-sync, wrong product, unnatural Nigerian speech." },
+    { role: "system", content: "You are Talla's Critic. Return ONLY JSON {verdict:pass|reject, score:1-10, checks:{face_consistency,skin_realism,product_accuracy,language_naturalness}, note}. Reject plastic skin, wrong product, unnatural Nigerian speech, or a scene framing the persona/H3 shot cannot perform. NOTE: you judge the scene plan and script text only (frame-aware video scoring is roadmap) — say so honestly in the note if relevant." },
     { role: "user", content: `Scene: ${JSON.stringify(scene)}\nExpected product: ${project.name} — ${project.description}\nLanguage: ${project.language}` },
   ]);
   await charge(env, "baseten", "critic", project.id);

@@ -47,8 +47,13 @@ def stitch(payload: dict) -> dict:
         if audio_path:
             dur = _probe_duration(audio_path) or float((lines[i] if i < len(lines) else {}).get("seconds", 5))
             prep = f"/tmp/clip{i}_voiced.mp4"
+            # Replace H3's track with the local voice. If the voice is LONGER
+            # than the clip, `-t` would cut it mid-sentence — so clone the
+            # final frame (tpad) to carry the picture to the end of the
+            # speech; `apad` pads the audio side symmetrically if shorter.
             subprocess.run(["ffmpeg", "-y", "-i", p, "-i", audio_path,
                             "-map", "0:v:0", "-map", "1:a:0", "-t", str(dur),
+                            "-vf", f"tpad=stop_mode=clone:stop_duration={dur}",
                             "-c:v", "libx264", "-crf", "18", "-preset", "fast",
                             "-af", "apad", "-c:a", "aac", "-pix_fmt", "yuv420p", prep],
                            check=True, capture_output=True)

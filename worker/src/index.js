@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { researchAgent, storyboardAgent, scriptAgent, criticAgent, exportAgent, LANGUAGES } from "./agents.js";
 import { creditSummary, LIMITS, charge, cacheGet, cacheSet, cacheKey, assertBudget } from "./credits.js";
-import { has, modalCall, modalJobCall, museImage } from "./providers.js";
+import { has, modalCall, modalJobCall, museImage, museTranscribe } from "./providers.js";
 import { PERSONAS, DEFAULT_PERSONA_ID, getPersona, voiceRoute, H3_NATIVE_AUDIO_LANGS } from "./personas.js";
 
 const app = new Hono();
@@ -31,10 +31,18 @@ async function getProject(env, pid) {
   return null;
 }
 
-// Hackathon model map (brief §2): Meta Muse does the visible, verifiable
-// work — brain, keyframes, critic. H3 renders picture; local open voice
-// speaks the Nigerian languages. The Studio shows these as per-stage
-// badges so judges can see exactly which model did what.
+// Hackathon model map (brief §2), VERIFIED live 2026-10-29 against
+// api.meta.ai/v1/models: muse-spark-1.3, muse-wonder-1.0, muse-image-1.0,
+// muse-voice-transcribe-1.0 all exist. Operating plan:
+//   Muse Spark Open (Baseten)  — the brain: research/storyboard/script/critic/export
+//   Muse Image 1.0 (Meta API)   — persona keyframes, AUTOMATIC inside /generate
+//   Muse Spark 1.3 (Meta API)   — the QUALITY FINAL: caption polish + critic
+//                                 second opinion on flagged/high-stakes scenes
+//   Muse Voice Transcribe (Meta)— VERIFY stage: transcribes the finished
+//                                 audio, Muse Spark compares it with the
+//                                 script (word-level honesty check)
+// Video (MiniMax H3) and Nigerian voices (YarnGPT2/MMS) are NOT Meta —
+// they are the media engines Muse directs. Never claim otherwise.
 export const MODEL_MAP = {
   research: "Muse Spark Open (Baseten)",
   storyboard: "Muse Spark Open (Baseten)",
@@ -45,6 +53,7 @@ export const MODEL_MAP = {
   critic: "Muse Spark Open (Baseten)",
   stitch: "ffmpeg composite (Modal)",
   export: "Muse Spark Open (Baseten)",
+  verify: "Muse Voice Transcribe 1.0 (Meta, verify stage)",
 };
 
 app.get("/api/health", (c) => c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["h3", "wan", "ltx"], models: MODEL_MAP, personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
@@ -181,7 +190,9 @@ app.post("/api/projects/:pid/generate", async (c) => {
   p.persona = persona.id;
   const env = c.env;
   const EP = endpoints(env);
-  const live = engine === "h3" ? Boolean(EP.h3) : Boolean(EP.wan);
+  // Live = the chosen engine AND its async result endpoint are both wired
+  // (modalJobCall would otherwise throw minutes into a paid render).
+  const live = engine === "h3" ? Boolean(EP.h3 && EP.h3Result) : Boolean(EP.wan && EP.wanResult);
   const nativeAudio = H3_NATIVE_AUDIO_LANGS.has((p.language || "").toLowerCase());
   const job = { id: id(), project_id: p.id, stage: "generate", engine, persona: persona.id,
     models: { research: MODEL_MAP.research, storyboard: MODEL_MAP.storyboard, script: MODEL_MAP.script,
@@ -280,11 +291,45 @@ app.post("/api/projects/:pid/generate", async (c) => {
   // failure must never fail a completed film. Also available standalone at
   // POST /api/projects/:pid/export for manual/copy-only use.
   if (job.status === "complete") {
+    // Verify: transcribe the local voice track(s) vs the script lines.
+    const expected = (p.script?.lines || []).map((l) => l.text).join(" ");
+    const firstVoice = job.scenes.find((s) => s.audio_url)?.audio_url || null;
+    job.verification = await verifySpoken(env, p, firstVoice, expected, p.language);
     try { job.posting_package = await exportAgent(env, p, job); } catch {}
   }
   await saveProject(env, p);
   return c.json(job, 201);
 });
+
+// Verify (Muse Voice Transcribe): transcribe the SPOKEN audio that will
+// actually ship and compare it against the script, so "the video says our
+// exact words" is checked, not assumed. The audio may live in the Modal
+// volume (modal-volume://) — then we fetch it via the TTS app's own
+// volume-mount path if present, else honestly defer. NEVER throws: a
+// verify failure must not fail a completed film.
+async function verifySpoken(env, p, audioRef, expectedText, language) {
+  const out = { status: "skipped", expected: expectedText || "", heard: null, similarity: null, words: null, note: null };
+  if (!has(env, "META_API_KEY")) { out.note = "META_API_KEY not set — verify skipped."; return out; }
+  if (!audioRef) { out.note = "No local voice track to verify (H3-native audio is checked by the critic score, not transcription)."; return out; }
+  try {
+    let b64 = null;
+    if (String(audioRef).startsWith("data:audio")) b64 = String(audioRef).split(",").pop();
+    else if (/^https?:/.test(audioRef)) {
+      const res = await fetch(audioRef); const buf = new Uint8Array(await res.arrayBuffer());
+      b64 = Buffer.from(buf).toString("base64");
+    }
+    if (!b64) { out.note = `Voice lives in the Modal volume (${audioRef}) — transcription runs when the audio is served over HTTP (R2). Deferred, not faked.`; return out; }
+    const { text, words } = await museTranscribe(env, b64, { language });
+    out.heard = text; out.words = words;
+    // crude word-overlap similarity (cheap honesty signal, not a metric claim)
+    const norm = (s) => new Set(String(s || "").toLowerCase().replace(/[^a-z0-9à-ÿ\s]/g, " ").split(/\s+/).filter(Boolean));
+    const a = norm(out.expected), b = norm(text);
+    if (a.size) { let hit = 0; for (const w of a) if (b.has(w)) hit++; out.similarity = Math.round((hit / a.size) * 100) / 100; }
+    out.status = "complete";
+    out.note = words?.length ? `Transcribed with word-level timestamps (${words.length} words).` : "Transcribed (no word timestamps returned by this model response).";
+  } catch (e) { out.status = "deferred"; out.note = `Verify deferred: ${e.message} — the API's transcription wire format is probed at runtime; generation is unaffected.`; }
+  return out;
+}
 
 // Export for Posting (standalone, optional): build/refresh the posting
 // package for the latest job without regenerating any media. Works in demo

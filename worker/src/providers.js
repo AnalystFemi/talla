@@ -76,6 +76,26 @@ export async function modalJobCall(spawnEndpoint, resultEndpoint, payload, { pol
   throw new Error(`Modal job timed out after ${Math.round(timeoutMs / 60000)} min (call ${spawn.call_id})`);
 }
 
+/** Muse Voice Transcribe 1.0 via Meta Model API — VERIFY stage.
+ *  One-shot probe: we post the WAV (multipart or JSON-b64) and TOLERATE the
+ *  response shape, since the exact transcription wire format is not yet
+ *  documented against our key. Never let this throw into generation. */
+export async function museTranscribe(env, wavB64, { language } = {}) {
+  const base = (env.META_BASE_URL || "https://api.meta.ai/v1").replace(/\/$/, "");
+  const body = { model: env.MUSE_TRANSCRIBE_MODEL || "muse-voice-transcribe-1.0",
+    file: wavB64, ...(language ? { language } : {}), response_format: "json" };
+  const res = await fetch(`${base}/audio/transcriptions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.META_API_KEY}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`MuseTranscribe ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const data = await res.json();
+  const text = data.text || data.transcript || data.data?.text || data.output_text || "";
+  const words = data.words || data.data?.words || null; // word-level timestamps when provided
+  return { text, words: Array.isArray(words) ? words : null };
+}
+
 /** Muse Image 1.0 via Meta Model API (OpenAI-compatible). $0.01/image. */
 export async function museImage(env, prompt, { size = "1024x1536" } = {}) {
   const base = (env.META_BASE_URL || "https://api.meta.ai/v1").replace(/\/$/, "");

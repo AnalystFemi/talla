@@ -16,6 +16,7 @@ export const BUDGETS_USD = {
 export const COSTS_USD = {
   "baseten:research": 0.02, "baseten:storyboard": 0.015, "baseten:script": 0.02,
   "baseten:critic": 0.01, "baseten:export": 0.01, "meta:muse_image": 0.01, "meta:spark_final": 0.05,
+  "meta:muse_transcribe": 0.01, "meta:spark_polish": 0.03,
   "modal:h3_clip": 0.35, "modal:wan_clip": 0.08,
   "modal:ltx_clip": 0.02, "modal:tts_scene": 0.01, "modal:stitch": 0.02,
   "firecrawl:scrape": 0.005, "exa:search": 0.005,
