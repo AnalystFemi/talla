@@ -1,0 +1,36 @@
+{
+  "note": "Golden bakeoff lines for Talla. Same lines go to hosted YarnGPT (reference), Modal open YarnGPT, and Pidgin specialist. Short lines = fewer credits. Do not add lines without checking credit_log.md budget.",
+  "budget": { "account_credits": 4000, "session_max_credits": 1000, "first_pass_max_calls": 5 },
+  "languages": {
+    "pidgin": [
+      "Stop wasting money on top of receipt wey no look serious.",
+      "Na this one finally solve am, no wahala again.",
+      "Your customer don pay, send receipt wey get your logo for ten seconds.",
+      "No be lie, watch am till the end, you go see the proof yourself."
+    ],
+    "yoruba": [
+      "Ẹ kú àárọ̀, báwo ni ọjà ṣe ń lọ lónìí?",
+      "Owó rẹ yóò dé láìsí wàhálà, má ṣe bẹ̀rù rárá.",
+      "Okó, ọkọ̀ àti oko jẹ́ ọ̀rọ̀ ọ̀tọ̀ọ̀tọ̀, ẹ gbọ́ mi dáadáa.",
+      "Mo fẹ́ show you bí iṣẹ́ mi ṣe rọrùn tó, watch till the end."
+    ],
+    "hausa": [
+      "Sannu da zuwa, ya kasuwa take tafiya yau?",
+      "Kuɗin ka zai iso lafiya, kada ka damu ko kaɗan.",
+      "Na gwada wannan sabon tsarin, gaskiya ya yi mini sauƙi sosai.",
+      "Idan kana son kasuwancin ka ya ci gaba, kalli wannan har zuwa ƙarshe."
+    ],
+    "igbo": [
+      "Nnọọ, kedu ka ahịa si aga taa?",
+      "Ego gị ga erute n'enweghị nsogbu ọ bụla, atụla ụjọ.",
+      "Ọ bụ oge ị kwụsị ịtụfu ego n'ihe na arụghị ọrụ.",
+      "Lee ya ruo na njedebe, ị ga ahụ ihe akaebe n'onwe gị."
+    ],
+    "nigerian-english": [
+      "That's not a receipt. Send this instead, your logo, in ten seconds.",
+      "Your customer pays, and you reply, payment received?",
+      "Make your first receipt free, straight to their WhatsApp.",
+      "I tested it myself this morning, and it just works, no stress."
+    ]
+  }
+}

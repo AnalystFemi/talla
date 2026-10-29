@@ -1,0 +1,210 @@
+[
+  {
+    "name": "umar",
+    "display_name": "Umar",
+    "description": null,
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "osagie",
+    "display_name": "Osagie",
+    "description": "Smooth, calm.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "mary",
+    "display_name": "Mary",
+    "description": "Energetic, youthful.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "adaora",
+    "display_name": "Adaora",
+    "description": "Warm, Engaging.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "zainab",
+    "display_name": "Zainab",
+    "description": "Soothing, gentle.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "adam",
+    "display_name": "Adam",
+    "description": "Deep, Clear.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "idera",
+    "display_name": "Idera",
+    "description": "Melodic, gentle.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": true
+  },
+  {
+    "name": "emma",
+    "display_name": "Emma",
+    "description": "Authoritative, deep.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "wura",
+    "display_name": "Wura",
+    "description": "Young, sweet.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "jude",
+    "display_name": "Jude",
+    "description": "Warm, confident.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "chinenye",
+    "display_name": "Chinenye",
+    "description": "Engaging, warm.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "tayo",
+    "display_name": "Tayo",
+    "description": "Upbeat, energetic.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "regina",
+    "display_name": "Regina",
+    "description": "Mature, warm.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "femi",
+    "display_name": "Femi",
+    "description": "Rich, reassuring.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "nonso",
+    "display_name": "Nonso",
+    "description": "Bold, resonant.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  },
+  {
+    "name": "remi",
+    "display_name": "Remi",
+    "description": "Melodious, warm.",
+    "languages": [
+      "english",
+      "pidgin",
+      "hausa",
+      "yoruba",
+      "igbo"
+    ],
+    "default": false
+  }
+]
