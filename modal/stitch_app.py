@@ -8,28 +8,61 @@ image = (modal.Image.debian_slim(python_version="3.12").apt_install("ffmpeg")
          .uv_pip_install("boto3", "requests", "fastapi[standard]").add_local_python_source("r2"))
 
 
+def _probe_duration(path: str) -> float:
+    import subprocess, json
+    out = subprocess.run(["ffprobe", "-v", "quiet", "-print_format", "json",
+                          "-show_format", path], capture_output=True, text=True)
+    try:
+        return float(json.loads(out.stdout)["format"]["duration"])
+    except Exception:
+        return 0.0
+
+
 @app.function(image=image, volumes={"/outputs": outputs}, timeout=600, scaledown_window=60)
 def stitch(payload: dict) -> dict:
-    """payload: {clip_urls[]|clip_volume_paths[], lines:[{text,seconds}], project_id}
-    -> {final_video_url}. Volume paths read the shared talla-outputs volume."""
+    """payload: {clip_volume_paths[]|clip_urls[],
+                 audio_volume_paths?: per-clip local voice, same order — when
+                   given for a clip, H3's native track is REPLACED by this
+                   voice and the picture is trimmed/padded to its length,
+                 lines:[{text,seconds}], project_id}
+    -> {final_video_url, final_volume_path}. Volume paths read the shared
+    talla-outputs volume (clips from H3/Wan, wavs from TTS/YarnGPT)."""
     import subprocess, time, requests, shutil, os
     from r2 import upload_to_r2
     outputs.reload()  # see clips committed by other containers
-    clips = []
     sources = payload.get("clip_volume_paths") or payload.get("clip_urls") or []
+    audio_sources = payload.get("audio_volume_paths") or []
+    lines = payload.get("lines", [])
+    clips, durations = [], []
     for i, src in enumerate(sources):
         p = f"/tmp/clip{i}.mp4"
         if payload.get("clip_volume_paths"):
             shutil.copy(f"/outputs/{src}", p)
         else:
             open(p, "wb").write(requests.get(src).content)
-        clips.append(p)
+        audio_path = None
+        if i < len(audio_sources) and audio_sources[i]:
+            audio_path = f"/tmp/voice{i}.wav"
+            shutil.copy(f"/outputs/{audio_sources[i]}", audio_path)
+        if audio_path:
+            dur = _probe_duration(audio_path) or float((lines[i] if i < len(lines) else {}).get("seconds", 5))
+            prep = f"/tmp/clip{i}_voiced.mp4"
+            subprocess.run(["ffmpeg", "-y", "-i", p, "-i", audio_path,
+                            "-map", "0:v:0", "-map", "1:a:0", "-t", str(dur),
+                            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                            "-af", "apad", "-c:a", "aac", "-pix_fmt", "yuv420p", prep],
+                           check=True, capture_output=True)
+            clips.append(prep)
+            durations.append(dur)
+        else:
+            clips.append(p)
+            durations.append(_probe_duration(p) or float((lines[i] if i < len(lines) else {}).get("seconds", 5)))
     listfile = "/tmp/list.txt"
     open(listfile, "w").write("\n".join(f"file '{c}'" for c in clips))
-    # Captions (SRT) from script lines
+    # Captions (SRT) from script lines, timed by the real clip durations.
     srt, t = [], 0.0
-    for i, line in enumerate(payload.get("lines", []), 1):
-        dur = float(line.get("seconds", 5))
+    for i, line in enumerate(lines, 1):
+        dur = durations[i - 1] if i - 1 < len(durations) else float(line.get("seconds", 5))
         fmt = lambda s: f"{int(s//3600):02d}:{int(s%3600//60):02d}:{s%60:06.3f}".replace(".", ",")
         srt.append(f"{i}\n{fmt(t)} --> {fmt(t+dur)}\n{line.get('text','')}\n")
         t += dur

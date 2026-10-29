@@ -15,6 +15,10 @@ const PIPELINE = [
   ["Critic", "Muse Spark rejects bad takes"], ["Final", "25–40s captioned UGC video"],
 ];
 const LANGS = ["pidgin", "yoruba", "hausa", "igbo", "nigerian-english"];
+const PERSONAS = [
+  { id: "female-creator", label: "Female creator", blurb: "Woman, late 20s, braids — voice: Idera (YarnGPT2)" },
+  { id: "male-creator", label: "Male creator", blurb: "Man, early 30s, fade + beard — voice: Jude (YarnGPT2)" },
+];
 
 async function api(path, opts) {
   const res = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...opts });
@@ -90,11 +94,12 @@ function Home({ go }) {
 }
 
 function Studio({ go }) {
-  const [form, setForm] = useState({ name: "", description: "", url: "", category: "", audience: "", language: "pidgin" });
+  const [form, setForm] = useState({ name: "", description: "", url: "", category: "", audience: "", language: "pidgin", persona: "female-creator" });
   const [project, setProject] = useState(null);
   const [job, setJob] = useState(null);
   const [frames, setFrames] = useState([]);
-  const [engine, setEngine] = useState("liveportrait");
+  const [engine, setEngine] = useState("h3");
+  const [voicePreview, setVoicePreview] = useState(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [credits, setCredits] = useState(null);
@@ -108,11 +113,12 @@ function Studio({ go }) {
     try { const out = await fn(); refreshCredits(); return out; }
     catch (e) { setError(e.message); } finally { setBusy(""); }
   }
-  const create = () => run("create", async () => { setJob(null); setFrames([]); setProject(await api("/api/projects", { method: "POST", body: JSON.stringify(form) })); });
+  const create = () => run("create", async () => { setJob(null); setFrames([]); setVoicePreview(null); setProject(await api("/api/projects", { method: "POST", body: JSON.stringify(form) })); });
   const stage = (name) => run(name, async () => setProject(await api(`/api/projects/${project.id}/${name}`, { method: "POST", body: JSON.stringify({ storyboard: project.storyboard }) })));
-  const generate = () => run("generate", async () => setJob(await api(`/api/projects/${project.id}/generate`, { method: "POST", body: JSON.stringify({ engine }) })));
+  const generate = () => run("generate", async () => setJob(await api(`/api/projects/${project.id}/generate`, { method: "POST", body: JSON.stringify({ engine, persona: form.persona }) })));
+  const previewVoice = () => run("voice", async () => setVoicePreview(await api(`/api/projects/${project.id}/voice-preview`, { method: "POST", body: JSON.stringify({ persona: form.persona }) })));
   const keyframes = () => run("keyframes", async () => {
-    const out = await api(`/api/projects/${project.id}/keyframes`, { method: "POST", body: JSON.stringify({}) });
+    const out = await api(`/api/projects/${project.id}/keyframes`, { method: "POST", body: JSON.stringify({ persona: form.persona }) });
     setFrames(out.keyframes || []);
   });
 
@@ -147,6 +153,12 @@ function Studio({ go }) {
             {LANGS.map((l) => <option key={l} value={l}>{l}</option>)}</select></div></div>
       <label>Who is it for? (audience)</label>
       <input value={form.audience} onChange={(e) => setForm({ ...form, audience: e.target.value })} placeholder="e.g. Instagram/WhatsApp vendors" />
+      <label>Your creator (face + voice are locked together — pick once)</label>
+      <div className="row">{PERSONAS.map((p) => (
+        <button type="button" key={p.id} className={"btn small " + (form.persona === p.id ? "accent" : "ghost")}
+          onClick={() => setForm({ ...form, persona: p.id })}>{p.label}</button>))}
+      </div>
+      <p className="hint">{PERSONAS.find((p) => p.id === form.persona)?.blurb}. The keyframe, the H3 speaker and the Nigerian voice all use this same person — no more face/voice mismatch.</p>
       <br /><button className="btn accent" disabled={!!busy} onClick={create}>{busy === "create" ? "Creating…" : "Create project"}</button>
     </div>
 
@@ -196,13 +208,20 @@ function Studio({ go }) {
       {project.script && <div className="panel"><h3>5. Film it</h3>
         <div className="agents-row">{AGENTS.map((a) => (
           <span key={a.key} className={"agent-chip" + (busy === "generate" ? " working" : "")}><img src={a.img} alt="" />{a.name}</span>))}</div>
-        <label>Video engine (all on Modal cloud GPU — nothing renders on your machine)</label>
+        <label>Video engine — MiniMax H3 on Modal (video + voice in one model)</label>
         <select value={engine} onChange={(e) => setEngine(e.target.value)}>
-          <option value="liveportrait">Lip-sync chain — keyframe + Nigerian voice (proven locally)</option>
-          <option value="h3">MiniMax H3 — cinematic (self-hosted, Modal, experimental)</option>
-          <option value="wan">Wan 2.2 — image-to-video (Modal)</option>
-          <option value="ltx">LTX — fallback (Modal)</option>
+          <option value="h3">MiniMax H3 — primary (self-hosted, Modal H100)</option>
+          <option value="wan">Wan 2.2 — image-to-video fallback (Modal)</option>
+          <option value="ltx">LTX — fallback floor (Modal)</option>
         </select>
+        <p className="hint">How voice works: Nigerian English keeps H3&apos;s own synced voice. Pidgin / Yoruba / Hausa / Igbo use our local Nigerian voice (YarnGPT2 / MMS) — generated first, then swapped onto H3&apos;s picture at stitch, so the words are exactly your script, spoken by your chosen creator.</p>
+        <button className="btn ghost" disabled={!!busy} onClick={previewVoice}>{busy === "voice" ? "Voicing…" : "▶ Preview my creator's voice"}</button>
+        {voicePreview && <div className="scene"><b>Voice preview</b> <span className="pill">{voicePreview.engine} · {voicePreview.voice || "fixed speaker"}</span>
+          {voicePreview.plan && <p className="hint">Plan: {voicePreview.plan}</p>}
+          {voicePreview.warning && <p className="hint">⚠ {voicePreview.warning}</p>}
+          {voicePreview.audio_url && !String(voicePreview.audio_url).startsWith("modal-volume://") && <audio controls src={voicePreview.audio_url} />}
+          {String(voicePreview.audio_url || "").startsWith("modal-volume://") && <p className="hint">Voice generated into the Modal volume ({voicePreview.audio_url}) — public playback unlocks when R2 keys are set.</p>}
+        </div>}
         <br /><br />
         <button className="btn" disabled={!!busy} onClick={keyframes}>{busy === "keyframes" ? "Generating keyframes…" : "1. Generate keyframes (Muse Image)"}</button>{" "}
         <button className="btn accent" disabled={!!busy} onClick={generate}>{busy === "generate" ? "Your team is filming…" : "2. Generate video"}</button>
@@ -216,9 +235,14 @@ function Studio({ go }) {
           <p className="hint" style={{ marginTop: 12 }}>{job.note}</p>
           {job.scenes?.map((s) => <div className="scene" key={s.scene}><b>Scene {s.scene}</b>{" "}
             <span className="pill pass">critic: {s.critic?.verdict} ({s.critic?.score}/10)</span>{" "}
-            <span className="pill demo">{s.mode}</span><p>{s.critic?.note}</p>
-            {s.clip_url && <video controls src={s.clip_url} />}</div>)}
-          {job.final_video_url && <video controls src={job.final_video_url} />}
+            <span className="pill demo">{s.mode}</span>
+            {s.voice && <span className="pill">voice: {s.voice.engine}{s.voice.voice ? ` · ${s.voice.voice}` : ""}</span>}
+            <p>{s.critic?.note}</p>
+            {s.voice?.warning && <p className="hint">⚠ {s.voice.warning}</p>}
+            {s.clip_url && !String(s.clip_url).startsWith("modal-volume://") && <video controls src={s.clip_url} />}
+            {String(s.clip_url || "").startsWith("modal-volume://") && <p className="hint">Clip in Modal volume: {s.clip_url}</p>}</div>)}
+          {job.final_video_url && !String(job.final_video_url).startsWith("modal-volume://") && <video controls src={job.final_video_url} />}
+          {String(job.final_video_url || "").startsWith("modal-volume://") && <p className="hint">Final video in Modal volume: {job.final_video_url} (public playback unlocks when R2 keys are set)</p>}
         </>}
       </div>}
     </>}

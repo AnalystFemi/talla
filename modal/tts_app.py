@@ -57,12 +57,18 @@ class NigerianTTS:
             return {"error": f"Unsupported language: {language}", "mode": "error"}
         out = self._pipe(language)(payload["text"])
         import os
-        path = f"/outputs/tts_{int(time.time())}.wav"
+        name = f"tts_{int(time.time())}.wav"
+        path = f"/outputs/{name}"
         sf.write(path, out["audio"], out["sampling_rate"])
         # Key must reuse the SAME basename — downstream reads /outputs/<basename>.
-        url = upload_to_r2(path, f"audio/{os.path.basename(path)}", "audio/wav")
+        url = upload_to_r2(path, f"audio/{name}", "audio/wav")
         outputs.commit()
-        return {"audio_url": url, "engine": f"mms:{TTS_MODELS[language]}",
+        # NOTE: MMS is single-speaker per language with no voice choice. If the
+        # project persona's gender does not match this fixed voice, that is a
+        # known limitation (flagged in the Worker) — YarnGPT2 is the routed
+        # voice wherever it serves the language.
+        return {"audio_url": url, "audio_volume_path": name,
+                "engine": f"mms:{TTS_MODELS[language]}", "voice": None,
                 "language": language, "mode": "live"}
 
 
