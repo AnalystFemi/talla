@@ -5,7 +5,13 @@
 // LOCKED Funmi v4 keyframe pre-seeded. Writes state to data/calibration_wan.json.
 //
 // Usage: node scripts/calibrate_wan.mjs            (spends Modal GPU credits)
-//        node scripts/calibrate_wan.mjs --dry      (prints plan, spends $0)
+//        node scripts/calibrate_wan.mjs --dry      (prints plan, spends $0 —
+//                                                    no API or Modal request)
+// Auth (hardening 2026-10-30): API calls send X-Talla-Access from
+// process.env.TALLA_ACCESS_CODE (falls back to .env); the direct Modal calls
+// send X-Talla-Token = MODAL_ENDPOINT_TOKEN (Modal endpoints 401 without it).
+// Modal result endpoints are NON-BLOCKING ({status:"running"} until done),
+// so this script polls them itself every 10 s.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -26,6 +32,11 @@ const env = loadEnv();
 const WAN = env.MODAL_WAN_ENDPOINT, WAN_RESULT = env.MODAL_WAN_RESULT_ENDPOINT;
 const STITCH = env.MODAL_STITCH_ENDPOINT, STITCH_RESULT = env.MODAL_STITCH_RESULT_ENDPOINT;
 const YARN = env.MODAL_YARN_ENDPOINT;
+const MODAL_TOKEN = process.env.MODAL_ENDPOINT_TOKEN || env.MODAL_ENDPOINT_TOKEN || "";
+const ACCESS_CODE = process.env.TALLA_ACCESS_CODE || env.TALLA_ACCESS_CODE || "";
+const API_HEADERS = { "Content-Type": "application/json", ...(ACCESS_CODE ? { "X-Talla-Access": ACCESS_CODE } : {}) };
+const MODAL_HEADERS = { "Content-Type": "application/json", ...(MODAL_TOKEN ? { "X-Talla-Token": MODAL_TOKEN } : {}) };
+const WAN_CAP_S = 5.0; // 720x1280 @16 fps, 81 frames max (~5.06 s) — owner decision 2026-10-30
 
 const API = process.env.API_BASE || "http://localhost:8787";
 const PERSONA = "female-creator-2"; // Funmi — LOCKED, user-accepted 2026-10-29
@@ -34,19 +45,21 @@ const LINE = "E ku ife, e ma se je ki iwe isanwo ti ko dara maa le awon onibara 
 const VOICE_VOLUME_PATH = "yarn_1793287035.wav"; // verified present in talla-outputs
 
 const post = async (path, body = {}) => {
-  const res = await fetch(API + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const res = await fetch(API + path, { method: "POST", headers: API_HEADERS, body: JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`${path} -> ${res.status}: ${JSON.stringify(data).slice(0, 400)}`);
   return data;
 };
 const modalSpawnPoll = async (spawnUrl, resultUrl, payload, timeoutMs = 25 * 60 * 1000) => {
-  const sres = await fetch(spawnUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  // ONE spawn POST, never retried (a retry after a gateway 5xx can bill twice).
+  const sres = await fetch(spawnUrl, { method: "POST", headers: MODAL_HEADERS, body: JSON.stringify(payload) });
   const spawn = await sres.json().catch(() => ({}));
+  if (!sres.ok) throw new Error(`spawn -> HTTP ${sres.status}${sres.status === 401 ? " (MODAL_ENDPOINT_TOKEN missing/wrong)" : ""}`);
   if (!spawn.call_id) return spawn;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 10000));
-    const rres = await fetch(`${resultUrl}?call_id=${encodeURIComponent(spawn.call_id)}`);
+    const rres = await fetch(`${resultUrl}?call_id=${encodeURIComponent(spawn.call_id)}`, { headers: MODAL_HEADERS });
     if (!rres.ok) continue;
     const out = await rres.json();
     if (out.status === "complete") return out;
@@ -57,9 +70,10 @@ const modalSpawnPoll = async (spawnUrl, resultUrl, payload, timeoutMs = 25 * 60 
 };
 
 console.log(`== Funmi Yoruba calibration (ONE Wan scene, persona ${PERSONA}) ==`);
-console.log(`endpoints: wan=${!!WAN} wan_result=${!!WAN_RESULT} stitch=${!!STITCH} yarn=${!!YARN}`);
+console.log(`endpoints: wan=${!!WAN} wan_result=${!!WAN_RESULT} stitch=${!!STITCH} yarn=${!!YARN} modal_token=${!!MODAL_TOKEN} access_code=${!!ACCESS_CODE}`);
 if (!WAN || !WAN_RESULT) throw new Error("MODAL_WAN_ENDPOINT(S) missing in .env");
-if (dry) { console.log("DRY RUN — plan only, $0 spent."); process.exit(0); }
+if (dry) { console.log(`DRY RUN — plan only, $0 spent. Would render ONE Wan scene at <=${WAN_CAP_S}s, then stitch.`); process.exit(0); }
+if (!MODAL_TOKEN) throw new Error("MODAL_ENDPOINT_TOKEN missing — token-gated Modal endpoints would 401");
 
 // 1) Fresh project (API is in-memory; everything happens in this server session).
 const project = await post("/api/projects", {
@@ -80,7 +94,7 @@ console.log(`script scene 1: "${(line1?.text || "").slice(0, 90)}"`);
 // 3) Seed the LOCKED Funmi v4 keyframe + SAM-QC it directly (no Muse charge).
 const kfUrl = readFileSync(join(root, "data", "funmi_keyframe_v4_url.txt"), "utf8").trim();
 const kfRes = await fetch(`${API}/api/projects/${project.id}/keyframes/seed`, {
-  method: "POST", headers: { "Content-Type": "application/json" },
+  method: "POST", headers: API_HEADERS,
   body: JSON.stringify({ scene: 1, keyframe_url: kfUrl }),
 });
 const kf = await kfRes.json().catch(() => ({}));
@@ -92,10 +106,10 @@ try {
 } catch (e) { console.log(`SAM QC skipped: ${e.message}`); }
 
 // 4) Wan clip — direct spawn/poll so this script owns the call lifecycle.
-//    Voice is 8.69s; Wan caps at 161 frames (~6.7s) and stitch tpad-clones
-//    the tail to cover the voice — honest known limit, flagged in the note.
+//    Voice is 8.69s; Wan now caps at 81 frames @16 fps (~5.0s) and stitch
+//    tpad-clones the tail to cover the voice — honest known limit.
 const b64 = kfUrl.split(",").pop();
-const seconds = Math.min(Math.max(Number(line1?.seconds) || 8, 5), 15);
+const seconds = Math.min(Number(line1?.seconds) || WAN_CAP_S, WAN_CAP_S);
 console.log(`spawning Wan (seconds=${seconds}) — first run downloads Wan 2.2 weights, be patient…`);
 const t0 = Date.now();
 const clip = await modalSpawnPoll(WAN, WAN_RESULT, {

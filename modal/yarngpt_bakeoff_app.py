@@ -33,7 +33,7 @@ DEFAULT_VOICE = {"english": "idera", "yoruba": "yoruba_female2",
                  "igbo": "igbo_female2", "hausa": "hausa_female1"}
 
 
-@app.cls(image=image, volumes={"/outputs": outputs}, gpu="T4", timeout=900, scaledown_window=60)
+@app.cls(image=image, volumes={"/outputs": outputs}, gpu="T4", timeout=900, scaledown_window=60, max_containers=1)
 class YarnBakeoff:
     @modal.enter()
     def load(self):

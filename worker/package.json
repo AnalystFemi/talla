@@ -6,7 +6,9 @@
     "dev": "node --env-file=../.env src/local.js",
     "deploy": "wrangler deploy",
     "db:local": "wrangler d1 execute talla --local --file=../infra/schema.sql",
-    "db:remote": "wrangler d1 execute talla --remote --file=../infra/schema.sql"
+    "db:remote": "wrangler d1 execute talla --remote --file=../infra/schema.sql",
+    "db:migrate": "wrangler d1 execute talla --remote --file=../infra/migrations/0002_hardening.sql",
+    "db:migrate:local": "wrangler d1 execute talla --local --file=../infra/migrations/0002_hardening.sql"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",

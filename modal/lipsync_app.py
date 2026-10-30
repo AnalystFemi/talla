@@ -6,9 +6,17 @@ the audio track is preserved untouched. (LivePortrait stays available for
 future video-driven work.) Weights download once into a Modal volume."""
 import modal
 
+try:  # FastAPI is always present in-container; locally it only shapes the signature.
+    from fastapi import Header
+except ImportError:  # pragma: no cover
+    def Header(default=None, **_):  # noqa: N802
+        return default
+
 app = modal.App("talla-lipsync")
 weights = modal.Volume.from_name("talla-lp-weights", create_if_missing=True)
 outputs = modal.Volume.from_name("talla-outputs", create_if_missing=True)
+# Endpoint auth (contract §4): resolved at deploy — create the secret first.
+auth_secret = modal.Secret.from_name("talla-endpoint-auth", required_keys=["TALLA_ENDPOINT_TOKEN"])
 
 image = (
     # SadTalker/gfpgan/basicsr need their era stack: py3.10 + torch 2.0
@@ -21,31 +29,33 @@ image = (
                     "facexlib==0.3.0", "gfpgan==1.3.8", "basicsr==1.4.2", "realesrgan", "av", "tqdm",
                     "opencv-python-headless", "imageio", "imageio-ffmpeg", "resampy",
                     "pydub", "ffmpeg-python", "safetensors", "einops", "fastapi[standard]")
+    # protobuf>=6 crash-loops Modal apps that mount volumes (proven 2026-10-29).
+    .uv_pip_install("protobuf==4.25.8")
     .run_commands(
         "git clone --depth 1 https://github.com/OpenTalker/SadTalker /opt/SadTalker",
     )
     # Volume mounts at /model_weights — never download into a mount path at
     # image-build time or Modal refuses to mount ("non-empty path").
     .env({"HF_HOME": "/model_weights"})
-    .add_local_python_source("r2")
+    .add_local_python_source("r2", "talla_common")
 )
 
 
 @app.cls(image=image, volumes={"/model_weights": weights, "/outputs": outputs},
-         gpu="T4", timeout=1200, scaledown_window=60)
+         gpu="T4", timeout=1200, scaledown_window=60, max_containers=1)  # PARKED
 class LipSync:
     @modal.method()
     def animate(self, payload: dict) -> dict:
         """payload: {keyframe_b64?|keyframe_url, audio_b64?|audio_url}
         -> {clip_url, engine, mode}. Audio is muxed untouched."""
         import base64, subprocess, time, requests, glob, os
-        from r2 import upload_to_r2
+        from talla_common import out_name, upload_or_volume, volume_path
         outputs.reload()  # warm containers otherwise see a stale volume view
 
-        def materialize(b64, url, path, volume_path=None):
-            if volume_path:  # shared talla-outputs volume: no HTTP transit
+        def materialize(b64, url, path, vol_name=None):
+            if vol_name:  # shared talla-outputs volume: no HTTP transit
                 import shutil
-                shutil.copy(f"/outputs/{volume_path}", path)
+                shutil.copy(volume_path(vol_name), path)
                 return
             data = base64.b64decode(b64) if b64 else requests.get(url, timeout=120).content
             open(path, "wb").write(data)
@@ -69,35 +79,32 @@ class LipSync:
         videos = sorted(glob.glob(f"{result_dir}/**/*.mp4", recursive=True), key=os.path.getmtime)
         if not videos:
             return {"error": "SadTalker produced no mp4", "log": (run.stdout + run.stderr)[-1500:], "mode": "error"}
-        out = f"/outputs/lipsync_{int(time.time())}.mp4"
+        name = out_name("lipsync", "mp4")
+        out = f"/outputs/{name}"
         subprocess.run(["cp", videos[-1], out], check=True)
-        import os
-        url = upload_to_r2(out, f"clips/{os.path.basename(out)}")
-        outputs.commit()
-        return {"clip_url": url, "engine": "sadtalker", "mode": "live"}
+        outputs.commit()  # on the volume before the optional upload
+        url = upload_or_volume(out, f"clips/{name}", "video/mp4", name)
+        return {"clip_url": url, "clip_volume_path": name, "engine": "sadtalker", "mode": "live"}
 
 
-@app.function(image=image, timeout=120)
+@app.function(image=image, timeout=120, secrets=[auth_secret])
 @modal.fastapi_endpoint(method="POST")
-def animate_http(payload: dict) -> dict:
+def animate_http(payload: dict, x_talla_token: str | None = Header(default=None)) -> dict:
     """Async spawn (GPU jobs exceed HTTP gateway timeouts):
     POST {keyframe_b64|url, audio_b64|url} -> {call_id, status}"""
+    from talla_common import require_token
+    require_token(x_talla_token)  # 401 BEFORE any GPU spawn
     call = LipSync().animate.spawn(payload)
     return {"call_id": call.object_id, "status": "running"}
 
 
-@app.function(image=image, timeout=60)
+@app.function(image=image, timeout=60, secrets=[auth_secret])
 @modal.fastapi_endpoint(method="GET")
-def animate_result(call_id: str) -> dict:
+def animate_result(call_id: str = "", x_talla_token: str | None = Header(default=None)) -> dict:
     """Poll a spawned lip-sync job: GET ?call_id=... -> {status, ...result}"""
-    call = modal.functions.FunctionCall.from_id(call_id)
-    try:
-        result = call.get(timeout=0)
-        return {"status": "complete", **(result or {})}
-    except TimeoutError:
-        return {"status": "running"}
-    except Exception as e:
-        return {"status": "error", "error": f"{type(e).__name__}: {str(e)[:400]}"}
+    from talla_common import poll_call, require_token
+    require_token(x_talla_token)
+    return poll_call(call_id)
 
 
 @app.local_entrypoint()

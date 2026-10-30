@@ -29,9 +29,17 @@ ONCE), then parks to $0. Draft renders use num_inference_steps=28.
 """
 import modal
 
+try:  # FastAPI is always present in-container; locally it only shapes the signature.
+    from fastapi import Header
+except ImportError:  # pragma: no cover
+    def Header(default=None, **_):  # noqa: N802
+        return default
+
 app = modal.App("talla-h3")
 weights = modal.Volume.from_name("talla-h3-weights", create_if_missing=True)
 outputs = modal.Volume.from_name("talla-outputs", create_if_missing=True)
+# Endpoint auth (contract §4): resolved at deploy — create the secret first.
+auth_secret = modal.Secret.from_name("talla-endpoint-auth", required_keys=["TALLA_ENDPOINT_TOKEN"])
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -46,7 +54,7 @@ image = (
           # expandable segments reduce fragmentation OOMs during the long
           # denoise (Funmi v4 run died at 78.6/79.2GB, 2026-10-29).
           "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
-    .add_local_python_source("r2")
+    .add_local_python_source("r2", "talla_common")
 )
 
 # H3 dialogue language tags (stable set). Anything else is described to the
@@ -85,7 +93,8 @@ def build_prompt(payload: dict) -> str:
 
 
 @app.cls(image=image, volumes={"/weights": weights, "/outputs": outputs},
-         gpu="H200", timeout=3600, scaledown_window=900, memory=131072)
+         gpu="H200", timeout=3600, scaledown_window=900, memory=131072,
+         max_containers=1)  # PARKED: never more than one H200
 class H3Engine:
     @modal.enter()
     def load(self):
@@ -137,7 +146,7 @@ class H3Engine:
         import torch
         from PIL import Image
         from diffusers.utils.export_utils import encode_video
-        from r2 import upload_to_r2
+        from talla_common import out_name, upload_or_volume
 
         seconds = float((payload.get("script") or {}).get("seconds") or payload.get("seconds") or 6)
         seconds = min(max(seconds, 5), 15)  # H3 window: 5-15s
@@ -170,7 +179,7 @@ class H3Engine:
         torch.cuda.empty_cache()
         results = self.pipe(**kwargs)
         videos, audio, sr = results["videos"], results.get("audio"), results.get("sampling_rate")
-        name = f"h3_{int(time.time())}.mp4"
+        name = out_name("h3", "mp4")
         raw = f"/outputs/{name}"
         if audio is not None and sr:
             encode_video(videos[0], fps=24, output_path=raw, audio=audio[0], audio_sample_rate=sr)
@@ -178,32 +187,29 @@ class H3Engine:
         else:
             encode_video(videos[0], fps=24, output_path=raw)
             has_audio = False
-        url = upload_to_r2(raw, f"clips/{os.path.basename(raw)}")
-        outputs.commit()
+        outputs.commit()  # paid work on the volume before the optional upload
+        url = upload_or_volume(raw, f"clips/{name}", "video/mp4", name)
         return {"clip_url": url, "clip_volume_path": name, "has_audio": has_audio,
                 "engine": "h3", "mode": "live", "num_inference_steps": steps,
                 "gpu": "H200", "num_frames": num_frames}
 
 
-@app.function(image=image, timeout=120)
+@app.function(image=image, timeout=120, secrets=[auth_secret])
 @modal.fastapi_endpoint(method="POST")
-def generate_http(payload: dict) -> dict:
+def generate_http(payload: dict, x_talla_token: str | None = Header(default=None)) -> dict:
     """Async spawn (H3 cold starts exceed HTTP timeouts): -> {call_id}"""
+    from talla_common import require_token
+    require_token(x_talla_token)  # 401 BEFORE any H200 spawn
     call = H3Engine().generate.spawn(payload)
     return {"call_id": call.object_id, "status": "running"}
 
 
-@app.function(image=image, timeout=60)
+@app.function(image=image, timeout=60, secrets=[auth_secret])
 @modal.fastapi_endpoint(method="GET")
-def generate_result(call_id: str) -> dict:
-    call = modal.functions.FunctionCall.from_id(call_id)
-    try:
-        result = call.get(timeout=0)
-        return {"status": "complete", **(result or {})}
-    except TimeoutError:
-        return {"status": "running"}
-    except Exception as e:
-        return {"status": "error", "error": f"{type(e).__name__}: {str(e)[:400]}"}
+def generate_result(call_id: str = "", x_talla_token: str | None = Header(default=None)) -> dict:
+    from talla_common import poll_call, require_token
+    require_token(x_talla_token)
+    return poll_call(call_id)
 
 
 @app.local_entrypoint()

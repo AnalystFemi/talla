@@ -1,49 +1,291 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { researchAgent, storyboardAgent, scriptAgent, criticAgent, exportAgent, LANGUAGES } from "./agents.js";
-import { creditSummary, LIMITS, charge, cacheGet, cacheSet, cacheKey, contentHash, assertBudget } from "./credits.js";
-import { has, modalCall, modalJobCall, museImage, museTranscribe, samSegment } from "./providers.js";
+import { researchAgent, storyboardAgent, scriptAgent, criticAgent, exportAgent, LANGUAGES, SCRIPT_FORMATS, CRITIC_LABEL } from "./agents.js";
+import { creditSummary, charge, cacheGet, cacheSet, cacheKey, contentHash, assertBudget, assertBudgetUsd, estimateCost, refreshTotals } from "./credits.js";
+import { has, modalCall, modalPollOnce, modalFile, museImage, museTranscribe, samSegment, bytesToBase64, base64ToBytes, VOICE_TIMEOUT_MS } from "./providers.js";
 import { PERSONAS, DEFAULT_PERSONA_ID, getPersona, voiceRoute } from "./personas.js";
 
 const app = new Hono();
-app.use("*", cors());
 
+// ------------------------------------------------------------- access ---
+// Contract §1. Public demo: anyone can browse/research/storyboard, but every
+// PAID call needs the access code. Rather than sprinkling key checks over
+// every route, an unauthorised request simply gets a "demo env" — a copy of
+// the bindings with every paid key/endpoint removed — so all routes fall
+// into their existing, clearly labelled demo paths ($0) by construction.
+const PAID_ENV_KEYS = ["BASETEN_API_KEY", "META_API_KEY", "FIRECRAWL_API_KEY", "EXA_API_KEY"];
+
+function safeEqual(a, b) {
+  // Constant-time over the longer input: no early exit on first mismatch.
+  const enc = new TextEncoder();
+  const x = enc.encode(String(a)), y = enc.encode(String(b));
+  let diff = x.length ^ y.length;
+  const n = Math.max(x.length, y.length);
+  for (let i = 0; i < n; i++) diff |= (x[i] | 0) ^ (y[i] | 0);
+  return diff === 0;
+}
+
+export function isAuthorized(env, header) {
+  if (env?.TALLA_DEV_OPEN === "1") return true; // local dev only — never set on the deployed Worker
+  const code = env?.TALLA_ACCESS_CODE;
+  if (!code || !header) return false; // no code configured -> nobody is authorised
+  return safeEqual(header, code);
+}
+
+function demoEnv(env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env || {})) {
+    if (PAID_ENV_KEYS.includes(k) || k.startsWith("MODAL_")) continue;
+    out[k] = v; // DB / MEDIA / plain vars stay, so demo work still persists
+  }
+  return out;
+}
+
+const DEV_ORIGINS = ["http://localhost:5173"];
+const allowedOrigins = (env) => [...DEV_ORIGINS,
+  ...String(env?.ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean)];
+
+app.use("*", cors({
+  origin: (origin, c) => (allowedOrigins(c.env).includes(origin) ? origin : null),
+  allowHeaders: ["Content-Type", "X-Talla-Access", "Range"],
+  allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
+  exposeHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
+  maxAge: 600,
+}));
+
+app.use("/api/*", async (c, next) => {
+  const raw = c.env || {};
+  const authorized = isAuthorized(raw, c.req.header("X-Talla-Access"));
+  c.set("raw_env", raw);
+  c.set("authorized", authorized);
+  c.env = authorized ? raw : demoEnv(raw);
+  // Budget totals come from D1 per request (contract §6) — skip for media
+  // reads, which never spend.
+  if (!c.req.path.startsWith("/api/media/")) await refreshTotals(raw);
+  await next();
+});
+
+const accessRequired = (c) => c.json({ error: "access_required", note: "This action spends paid credits and needs the access code (X-Talla-Access)." }, 401);
+
+// Body parsing: invalid JSON is a 400, never a silent {} that then runs a
+// paid stage with defaults. Empty body = {} (routes with optional bodies).
+const BAD_JSON = Symbol("bad_json");
+async function readJson(c, maxBytes = 256 * 1024) {
+  const text = await c.req.text().catch(() => "");
+  if (text.length > maxBytes) return BAD_JSON;
+  if (!text.trim()) return {};
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : BAD_JSON;
+  } catch { return BAD_JSON; }
+}
+const badJson = (c) => c.json({ error: "invalid_json", note: "Body must be a JSON object." }, 400);
+
+// Map an error to a client response without echoing provider bodies
+// (providers.js only puts status codes in messages; bodies are logged).
+function failure(c, name, e) {
+  const msg = String(e?.message || e || "unknown error");
+  if (msg.startsWith("BUDGET_EXHAUSTED")) return c.json({ error: msg, note: "Refused by the credit guard before any paid call." }, 402);
+  console.error(`[${name}]`, e);
+  return c.json({ error: `${name} failed: ${msg.slice(0, 160)}` }, 502);
+}
+
+// ------------------------------------------------------------ storage ---
 // Storage: D1 on Cloudflare, in-memory locally. Same route code both ways.
-const mem = { projects: new Map(), jobs: new Map() };
-const id = () => Math.random().toString(36).slice(2, 10);
+// With D1 bound, D1 is the source of truth (several isolates may serve one
+// client's polls), mem is only a fallback/cache.
+const mem = { projects: new Map(), jobs: new Map(), locks: new Map() };
+const JSON_COLS = ["research", "storyboard", "script", "keyframes", "segmentation"];
 
 async function saveProject(env, p) {
   mem.projects.set(p.id, p);
   if (env?.DB) { try {
-    // persona/keyframes/segmentation persist too, so a Workers cold start
-    // never re-bills Muse Image or reverts the locked creator (audit #17).
-    await env.DB.prepare(`INSERT INTO projects (id,name,description,url,category,audience,language,research,storyboard,script,status,persona,keyframes,segmentation)
-      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(id) DO UPDATE SET research=excluded.research, storyboard=excluded.storyboard, script=excluded.script, status=excluded.status, persona=excluded.persona, keyframes=excluded.keyframes, segmentation=excluded.segmentation`)
-      .bind(p.id, p.name, p.description, p.url, p.category, p.audience, p.language,
+    // persona/keyframes/segmentation/format persist too, so a Workers cold
+    // start never re-bills Muse Image or reverts the locked creator (audit #17).
+    // keyframes hold only {scene, keyframe_key, source, image_hash} when R2
+    // is bound (row-size safe); data URLs only in local/no-R2 setups.
+    await env.DB.prepare(`INSERT INTO projects (id,name,description,url,category,audience,language,research,storyboard,script,status,persona,keyframes,segmentation,format)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) ON CONFLICT(id) DO UPDATE SET research=excluded.research, storyboard=excluded.storyboard, script=excluded.script, status=excluded.status, persona=excluded.persona, keyframes=excluded.keyframes, segmentation=excluded.segmentation, format=excluded.format`)
+      .bind(p.id, p.name ?? null, p.description ?? null, p.url ?? null, p.category ?? null, p.audience ?? null, p.language,
         JSON.stringify(p.research || null), JSON.stringify(p.storyboard || null), JSON.stringify(p.script || null), p.status,
-        p.persona || null, JSON.stringify(p.keyframes || null), JSON.stringify(p.segmentation || null)).run();
-  } catch {} }
+        p.persona || null, JSON.stringify(p.keyframes || null), JSON.stringify(p.segmentation || null), p.format || null).run();
+  } catch (e) { console.error("[d1] saveProject failed:", e?.message || e); } }
   return p;
 }
 async function getProject(env, pid) {
-  if (mem.projects.has(pid)) return mem.projects.get(pid);
   if (env?.DB) { try {
     const row = await env.DB.prepare("SELECT * FROM projects WHERE id=?1").bind(pid).first();
-    if (row) { for (const k of ["research", "storyboard", "script", "keyframes", "segmentation"]) { try { row[k] = JSON.parse(row[k]); } catch {} } mem.projects.set(pid, row); return row; }
-  } catch {} }
-  return null;
+    if (row) {
+      for (const k of JSON_COLS) { try { row[k] = JSON.parse(row[k]); } catch { row[k] = null; } }
+      mem.projects.set(pid, row); return row;
+    }
+  } catch (e) { console.error("[d1] getProject failed:", e?.message || e); } }
+  return mem.projects.get(pid) || null;
 }
 
+// Project JSON for clients: R2 keyframes are exposed as Worker URLs, raw
+// keys/data stay internal.
+function publicProject(p) {
+  if (!p) return p;
+  return { ...p, keyframes: Array.isArray(p.keyframes) ? p.keyframes.map((f) => ({
+    scene: f.scene, source: f.source || "muse-image", image_hash: f.image_hash || null,
+    keyframe_url: f.keyframe_key ? `/api/media/r2/${f.keyframe_key}` : (f.keyframe_url || null),
+  })) : p.keyframes };
+}
+
+async function saveJob(env, job, { create = false } = {}) {
+  job.updated_at = new Date().toISOString();
+  mem.jobs.set(job.id, job);
+  if (!env?.DB) return true;
+  try {
+    await env.DB.prepare(`INSERT INTO jobs (id, project_id, stage, engine, status, progress, output_url, error, data, updated_at)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET status=excluded.status, progress=excluded.progress,
+      output_url=excluded.output_url, error=excluded.error, data=excluded.data, updated_at=excluded.updated_at`)
+      .bind(job.id, job.project_id, job.stage, job.engine, job.status, job.progress, job.final_media_url || null,
+        job.error || null, JSON.stringify(job), job.updated_at).run();
+    return true;
+  } catch (e) {
+    console.error("[d1] saveJob failed:", e?.message || e);
+    if (create) throw e; // the one-running-job unique index surfaces here
+    return false;
+  }
+}
+async function getJob(env, jid) {
+  if (env?.DB) { try {
+    const row = await env.DB.prepare("SELECT data FROM jobs WHERE id=?1").bind(jid).first();
+    if (row?.data) { const job = JSON.parse(row.data); mem.jobs.set(jid, job); return job; }
+  } catch (e) { console.error("[d1] getJob failed:", e?.message || e); } }
+  return mem.jobs.get(jid) || null;
+}
+async function findRunningJob(env, pid) {
+  if (env?.DB) { try {
+    const row = await env.DB.prepare("SELECT id FROM jobs WHERE project_id=?1 AND stage='generate' AND status='running' ORDER BY created_at DESC LIMIT 1").bind(pid).first();
+    return row?.id || null; // D1 is authoritative: a stale "running" copy in this isolate's mem must not 409
+  } catch (e) { console.error("[d1] findRunningJob failed:", e?.message || e); } }
+  for (const j of mem.jobs.values()) if (j.project_id === pid && j.stage === "generate" && j.status === "running") return j.id;
+  return null;
+}
+async function latestJob(env, pid) {
+  if (env?.DB) { try {
+    const row = await env.DB.prepare("SELECT data FROM jobs WHERE project_id=?1 ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(pid).first();
+    if (row?.data) return JSON.parse(row.data);
+  } catch (e) { console.error("[d1] latestJob failed:", e?.message || e); } }
+  return [...mem.jobs.values()].filter((j) => j.project_id === pid).pop() || null;
+}
+
+// Job lock (contract §3): at most one step runs per job at a time, across
+// isolates, so concurrent client polls can never double-spawn a paid GPU
+// call. The lock outlives the longest single step (voice 180 s + slack).
+const JOB_LOCK_MS = 5 * 60 * 1000;
+async function acquireLock(env, jid) {
+  const now = Date.now();
+  if (env?.DB) {
+    try {
+      const r = await env.DB.prepare("UPDATE jobs SET lock_until=?1 WHERE id=?2 AND (lock_until IS NULL OR lock_until < ?3)")
+        .bind(now + JOB_LOCK_MS, jid, now).run();
+      return (r?.meta?.changes ?? 0) === 1;
+    } catch (e) { console.error("[d1] acquireLock failed:", e?.message || e); return false; } // fail closed: no step
+  }
+  if ((mem.locks.get(jid) || 0) > now) return false;
+  mem.locks.set(jid, now + JOB_LOCK_MS);
+  return true;
+}
+async function releaseLock(env, jid) {
+  mem.locks.delete(jid);
+  if (env?.DB) { try { await env.DB.prepare("UPDATE jobs SET lock_until=0 WHERE id=?1").bind(jid).run(); }
+    catch (e) { console.error("[d1] releaseLock failed:", e?.message || e); } }
+}
+
+function publicJob(job) {
+  if (!job) return job;
+  const { state, ...rest } = job; // step-machine cursor + internal paths stay server-side
+  return rest;
+}
+
+// --------------------------------------------------------------- media ---
+// Contract §5. Worker-relative URLs so <video src> works with the API base.
+const MEDIA_NAME = /^[A-Za-z0-9._-]+\.(mp4|wav|mp3|webp|png|jpg)$/;
+const mediaUrl = (name) => (name && MEDIA_NAME.test(name) ? `/api/media/file/${name}` : null);
+const volumeBasename = (u) => (u ? String(u).split("/").pop() : null);
+const R2_KEY = /^keyframes\/[A-Za-z0-9-]+\/\d+-[A-Za-z0-9-]+\.webp$/;
+
+// Store one keyframe still. With R2 bound the bytes live in R2 and D1 keeps
+// only the key (a 1-2 MB data URL per scene would blow the D1 row limit).
+async function storeKeyframe(env, p, sceneN, dataUrl, source) {
+  const image_hash = contentHash(dataUrl);
+  const frame = { scene: sceneN, source, image_hash };
+  const m = /^data:(image\/[a-z+.-]+);base64,(.+)$/i.exec(String(dataUrl || ""));
+  if (env?.MEDIA && m) {
+    const key = `keyframes/${p.id}/${sceneN}-${image_hash}.webp`;
+    await env.MEDIA.put(key, base64ToBytes(m[2]), { httpMetadata: { contentType: m[1] } });
+    frame.keyframe_key = key;
+  } else frame.keyframe_url = dataUrl; // local dev: inline data URL (or a remote URL Muse returned)
+  p.keyframes = [...(p.keyframes || []).filter((f) => f.scene !== sceneN), frame];
+  return frame;
+}
+
+// Resolve any stored frame to a data URL (SAM input, Wan keyframe_b64).
+async function frameDataUrl(env, f) {
+  if (!f) return null;
+  if (f.keyframe_key) {
+    if (!env?.MEDIA) return null;
+    const obj = await env.MEDIA.get(f.keyframe_key);
+    if (!obj) return null;
+    const type = obj.httpMetadata?.contentType || "image/webp";
+    return `data:${type};base64,${bytesToBase64(new Uint8Array(await obj.arrayBuffer()))}`;
+  }
+  const u = String(f.keyframe_url || "");
+  if (u.startsWith("data:image")) return u;
+  if (/^https?:/.test(u)) {
+    const res = await fetch(u, { signal: AbortSignal.timeout(30000) });
+    if (!res.ok) return null;
+    return `data:${res.headers.get("content-type") || "image/webp"};base64,${bytesToBase64(new Uint8Array(await res.arrayBuffer()))}`;
+  }
+  return null;
+}
+const frameFor = (p, n) => (p.keyframes || []).find((f) => f.scene === n && (f.keyframe_key || f.keyframe_url));
+
+app.get("/api/media/file/:name", async (c) => {
+  // Public read (names are collision-safe <prefix>_<unix>_<8hex>), but the
+  // Modal file endpoint itself is token-gated, so use the RAW env here.
+  const name = c.req.param("name");
+  if (!MEDIA_NAME.test(name)) return c.json({ error: "bad_name" }, 400);
+  const env = c.get("raw_env");
+  if (!env?.MODAL_FILE_ENDPOINT) return c.json({ error: "media_unavailable", note: "MODAL_FILE_ENDPOINT not configured." }, 404);
+  let res;
+  try { res = await modalFile(env, name, { range: c.req.header("Range") }); }
+  catch (e) { console.error("[media] file fetch failed:", e?.message || e); return c.json({ error: "media_unreachable" }, 502); }
+  if (!res || (!res.ok && res.status !== 206)) {
+    if (res) console.error(`[media] file endpoint HTTP ${res.status} for ${name}`);
+    return c.json({ error: res?.status === 404 ? "not_found" : "media_error" }, res?.status === 404 ? 404 : 502);
+  }
+  const headers = new Headers();
+  for (const h of ["content-type", "content-length", "content-range", "accept-ranges"]) {
+    const v = res.headers.get(h); if (v) headers.set(h, v);
+  }
+  headers.set("cache-control", "public, max-age=3600");
+  return new Response(res.body, { status: res.status, headers });
+});
+
+app.get("/api/media/r2/*", async (c) => {
+  const key = decodeURIComponent(c.req.path.slice("/api/media/r2/".length));
+  if (!R2_KEY.test(key)) return c.json({ error: "bad_key" }, 400);
+  const env = c.get("raw_env");
+  if (!env?.MEDIA) return c.json({ error: "media_unavailable" }, 404);
+  const obj = await env.MEDIA.get(key);
+  if (!obj) return c.json({ error: "not_found" }, 404);
+  return new Response(obj.body, { headers: { "content-type": obj.httpMetadata?.contentType || "image/webp",
+    "cache-control": "public, max-age=86400, immutable" } }); // key embeds the content hash
+});
+
+// ------------------------------------------------------------- models ---
 // Hackathon model map (brief §2), VERIFIED live 2026-10-29 against
 // api.meta.ai/v1/models: muse-spark-1.3, muse-wonder-1.0, muse-image-1.0,
 // muse-voice-transcribe-1.0 all exist. Operating plan:
 //   Muse Spark Open (Baseten)  — the brain: research/storyboard/script/critic/export
 //   Muse Image 1.0 (Meta API)   — persona keyframes, AUTOMATIC inside /generate
-//   Muse Spark 1.3 (Meta API)   — the QUALITY FINAL: caption polish + critic
-//                                 second opinion on flagged/high-stakes scenes
 //   Muse Voice Transcribe (Meta)— VERIFY stage: transcribes the finished
-//                                 audio, Muse Spark compares it with the
-//                                 script (word-level honesty check)
+//                                 audio and compares it with the script
 // Video (Wan 2.2 / LTX silent motion) and Nigerian voices (YarnGPT2/MMS)
 // are NOT Meta — they are the media engines Muse directs. Never claim
 // otherwise. MiniMax H3 is PARKED (2026-10-29: both H100 and H200 runs
@@ -58,34 +300,128 @@ export const MODEL_MAP = {
   keyframe: "Muse Image 1.0 (Meta)",
   voice: "YarnGPT2 / MMS (Modal, open)",
   video: { h3: "MiniMax H3 (Modal H200, ON HOLD)", wan: "Wan 2.2 (Modal, primary)", ltx: "LTX 2.5 (Modal, cheapest)" },
-  critic: "Muse Spark Open (Baseten)",
+  critic: `Muse Spark Open (Baseten) — ${CRITIC_LABEL}`,
   stitch: "ffmpeg composite (Modal)",
   export: "Muse Spark Open (Baseten)",
   verify: "Muse Voice Transcribe 1.0 (Meta, verify stage)",
   segment: "SAM 3.1 (Meta, keyframe QC)",
 };
+const ENGINE_LABEL = { wan: "Wan 2.2", ltx: "LTX 2.5" };
+// Engine duration caps (owner decision 2026-10-30): Wan 720x1280 @16 fps,
+// 81 frames max (~5.06 s) -> 5.0 s; LTX 8n+1 frames @24 fps, cap 257 -> 10.6 s.
+const ENGINE_CAP_S = { wan: 5.0, ltx: 10.6 };
 
-app.get("/api/health", (c) => c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["wan", "ltx"], h3_status: "parked", models: MODEL_MAP, personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
-  providers: { baseten: has(c.env, "BASETEN_API_KEY"), meta: has(c.env, "META_API_KEY"),
-    firecrawl: has(c.env, "FIRECRAWL_API_KEY"), exa: has(c.env, "EXA_API_KEY"),
-    modal_tts: has(c.env, "MODAL_TTS_ENDPOINT"), modal_yarn: has(c.env, "MODAL_YARN_ENDPOINT"),
-    modal_wan: has(c.env, "MODAL_WAN_ENDPOINT"), modal_wan_result: has(c.env, "MODAL_WAN_RESULT_ENDPOINT"),
-    modal_h3: has(c.env, "MODAL_H3_ENDPOINT"), modal_h3_parked: true,
-    modal_stitch: has(c.env, "MODAL_STITCH_ENDPOINT"), modal_stitch_result: has(c.env, "MODAL_STITCH_RESULT_ENDPOINT") } }));
+function liveMode(env) {
+  return has(env, "BASETEN_API_KEY") || has(env, "META_API_KEY") || has(env, "MODAL_WAN_ENDPOINT");
+}
+
+app.get("/api/health", (c) => {
+  const authorized = Boolean(c.get("authorized"));
+  return c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["wan", "ltx"], h3_status: "parked", models: MODEL_MAP,
+    personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
+    access: { required: true, authorized },
+    mode: authorized && liveMode(c.env) ? "live" : "demo",
+    // Flags reflect THIS request's effective env (demo env when unauthorised).
+    providers: { baseten: has(c.env, "BASETEN_API_KEY"), meta: has(c.env, "META_API_KEY"),
+      firecrawl: has(c.env, "FIRECRAWL_API_KEY"), exa: has(c.env, "EXA_API_KEY"),
+      modal_tts: has(c.env, "MODAL_TTS_ENDPOINT"), modal_yarn: has(c.env, "MODAL_YARN_ENDPOINT"),
+      modal_wan: has(c.env, "MODAL_WAN_ENDPOINT"), modal_wan_result: has(c.env, "MODAL_WAN_RESULT_ENDPOINT"),
+      modal_h3: false, modal_h3_parked: true,
+      modal_stitch: has(c.env, "MODAL_STITCH_ENDPOINT"), modal_stitch_result: has(c.env, "MODAL_STITCH_RESULT_ENDPOINT"),
+      modal_file: has(c.env, "MODAL_FILE_ENDPOINT"), modal_token: has(c.env, "MODAL_ENDPOINT_TOKEN"),
+      r2: Boolean(c.env?.MEDIA), d1: Boolean(c.env?.DB) } });
+});
+
+app.post("/api/access/check", (c) => {
+  const authorized = Boolean(c.get("authorized"));
+  return c.json({ authorized }, authorized ? 200 : 401);
+});
 
 app.get("/api/credits", (c) => c.json(creditSummary()));
 
+// ----------------------------------------------------------- projects ---
+const FIELD_MAX = 2000;
+const str = (v, max = FIELD_MAX) => (v == null ? null : String(v).slice(0, max).trim() || null);
+
 app.post("/api/projects", async (c) => {
-  const body = await c.req.json();
-  if (!body.name && !body.category && !body.url) return c.json({ error: "Give a product name, a category, or a URL." }, 400);
-  const p = await saveProject(c.env, { id: id(), status: "draft", language: "pidgin", persona: DEFAULT_PERSONA_ID, ...body });
-  p.persona = getPersona(p.persona).id; // normalise whatever the client sent
-  return c.json(p, 201);
+  const body = await readJson(c);
+  if (body === BAD_JSON) return badJson(c);
+  // Whitelist: the client can no longer set id/status/research/keyframes etc.
+  const name = str(body.name), description = str(body.description), category = str(body.category),
+    audience = str(body.audience);
+  let url = str(body.url);
+  if (url) {
+    try { const u = new URL(url); if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("scheme"); url = u.toString(); }
+    catch { return c.json({ error: "url must be an http(s) URL" }, 400); }
+  }
+  if (!name && !category && !url) return c.json({ error: "Give a product name, a category, or a URL." }, 400);
+  const language = LANGUAGES.includes(String(body.language || "").toLowerCase()) ? String(body.language).toLowerCase() : "pidgin";
+  const format = SCRIPT_FORMATS.includes(body.format) ? body.format : "standard";
+  const p = { id: crypto.randomUUID(), status: "draft", name, description, url, category, audience, language, format,
+    persona: getPersona(body.persona || DEFAULT_PERSONA_ID).id }; // normalised BEFORE save
+  await saveProject(c.env, p);
+  return c.json(publicProject(p), 201);
 });
 
 app.get("/api/projects/:pid", async (c) => {
   const p = await getProject(c.env, c.req.param("pid"));
-  return p ? c.json(p) : c.json({ error: "Project not found" }, 404);
+  return p ? c.json(publicProject(p)) : c.json({ error: "Project not found" }, 404);
+});
+
+// A changed scene invalidates the still + QC for that scene only, so a
+// regenerated still is re-checked by SAM instead of inheriting the old
+// frame's verdict (audit #8). MUST diff against the OLD storyboard — the
+// previous code assigned the new one first and so compared it to itself.
+async function invalidateChangedScenes(env, p, oldBoard, newBoard) {
+  const before = new Map((oldBoard?.scenes || []).map((s) => [s.n, String(s.visual || "")]));
+  const after = new Map((newBoard?.scenes || []).map((s) => [s.n, String(s.visual || "")]));
+  const changed = new Set();
+  for (const [n, v] of after) if (before.get(n) !== v) changed.add(n);
+  for (const n of before.keys()) if (!after.has(n)) changed.add(n);
+  if (!changed.size) return [];
+  const dropped = (p.keyframes || []).filter((f) => changed.has(f.scene));
+  p.keyframes = (p.keyframes || []).filter((f) => !changed.has(f.scene));
+  p.segmentation = (p.segmentation || []).filter((r) => !changed.has(r.scene));
+  if (env?.MEDIA) for (const f of dropped) if (f.keyframe_key) {
+    try { await env.MEDIA.delete(f.keyframe_key); } catch (e) { console.error("[r2] delete failed:", e?.message || e); }
+  }
+  return [...changed];
+}
+
+function sanitizeOverlay(o) {
+  if (!o || typeof o !== "object") return null;
+  const style = o.style === "fullscreen" ? "fullscreen" : "pip";
+  return { asset: str(o.asset, 60), note: str(o.note, 200), seconds: Math.min(Math.max(Number(o.seconds) || 4, 1), 15), style };
+}
+function sanitizeStoryboard(sb) {
+  if (!sb || typeof sb !== "object" || !Array.isArray(sb.scenes) || !sb.scenes.length || sb.scenes.length > 12) return null;
+  const scenes = sb.scenes.map((s, i) => {
+    const o = s && typeof s === "object" ? s : {};
+    const n = Number.isInteger(Number(o.n)) && Number(o.n) > 0 ? Number(o.n) : i + 1;
+    return { n, purpose: str(o.purpose, 200), shot: str(o.shot, 300), key_line: str(o.key_line), visual: str(o.visual),
+      seconds: Math.min(Math.max(Number(o.seconds) || 6, 1), 15), overlay: sanitizeOverlay(o.overlay) };
+  });
+  if (new Set(scenes.map((s) => s.n)).size !== scenes.length) return null; // duplicate scene numbers
+  return { mode: sb.mode === "live" ? "live" : sb.mode === "demo" ? "demo" : "edited", format: SCRIPT_FORMATS.includes(sb.format) ? sb.format : undefined, scenes };
+}
+
+// Save-only storyboard edit (contract §2): free, no agent call, no access
+// code. /script then writes from exactly this saved board.
+app.put("/api/projects/:pid/storyboard", async (c) => {
+  const p = await getProject(c.env, c.req.param("pid"));
+  if (!p) return c.json({ error: "Project not found" }, 404);
+  const body = await readJson(c);
+  if (body === BAD_JSON) return badJson(c);
+  const board = sanitizeStoryboard(body.storyboard);
+  if (!board) return c.json({ error: "Body must be { storyboard: { scenes: [1-12 scenes with unique n] }, format? }" }, 400);
+  if (SCRIPT_FORMATS.includes(body.format)) p.format = body.format;
+  board.format = board.format || p.format || "standard";
+  board.edited = true;
+  const invalidated = await invalidateChangedScenes(c.env, p, p.storyboard, board); // OLD vs NEW, before assigning
+  p.storyboard = board;
+  p.status = "storyboarded";
+  await saveProject(c.env, p);
+  return c.json({ ...publicProject(p), invalidated_scenes: invalidated });
 });
 
 async function stage(c, name, fn, status) {
@@ -93,163 +429,164 @@ async function stage(c, name, fn, status) {
   if (!p) return c.json({ error: "Project not found" }, 404);
   if (name === "storyboard" && !p.research) return c.json({ error: "Run research first" }, 400);
   if (name === "script" && !p.storyboard) return c.json({ error: "Run storyboard first" }, 400);
-  const body = name === "storyboard" ? await c.req.json().catch(() => ({})) : {};
-  if (body.storyboard) {
-    p.storyboard = body.storyboard; // user edits from the studio
-    // A changed scene invalidates the still + QC for that scene only, so a
-    // regenerated still is re-checked by SAM instead of inheriting the old
-    // frame's verdict (audit #8 companion to the content-hash cache).
-    const edited = new Set((body.storyboard.scenes || []).map((s) => s.n));
-    if (Array.isArray(p.keyframes)) p.keyframes = p.keyframes.filter((f) => !edited.has(f.scene) || (body.storyboard.scenes || []).some((s) => s.n === f.scene && String(s.visual || "") === String((p.storyboard.scenes || []).find((o) => o.n === f.scene)?.visual || "")));
-  }
-  if (name === "storyboard" && (body.format === "confession" || body.format === "standard")) p.format = body.format;
-  try { p[name] = await fn(c.env, p); }
-  catch (e) { console.error(`[${name}]`, e); return c.json({ error: `${name} failed: ${e.message}` }, 502); }
+  const body = await readJson(c);
+  if (body === BAD_JSON) return badJson(c);
+  // POST /storyboard = REGENERATE via the agent. Edits go through PUT, so
+  // this route no longer accepts a storyboard body that the agent would
+  // then silently overwrite.
+  if (name === "storyboard" && SCRIPT_FORMATS.includes(body.format)) p.format = body.format;
+  const old = p[name];
+  let out;
+  try { out = await fn(c.env, p); }
+  catch (e) { return failure(c, name, e); }
+  if (name === "storyboard") await invalidateChangedScenes(c.env, p, old, out);
+  p[name] = out;
   p.status = status;
   await saveProject(c.env, p);
-  return c.json(p);
+  return c.json(publicProject(p));
 }
 app.post("/api/projects/:pid/research", (c) => stage(c, "research", researchAgent, "researched"));
 app.post("/api/projects/:pid/storyboard", (c) => stage(c, "storyboard", storyboardAgent, "storyboarded"));
 app.post("/api/projects/:pid/script", (c) => stage(c, "script", scriptAgent, "scripted"));
 
+// --------------------------------------------------------- generation ---
 // Generation (open-source-first — user decision 2026-10-29; H3 PARKED
 // after H100 + H200 both failed the cost/speed bar):
-//   storyboard scenes -> persona keyframe -> Wan 2.2 / LTX silent motion
-//   + local Nigerian voice FIRST (YarnGPT2, or MMS for Pidgin), its real
-//   duration sizes the motion clip, stitch muxes the voice onto the
-//   picture — the winning-UGC voiceover format: continuous talk + proof
-//   cutaways (real screen recordings composited as overlays, never AI-drawn).
-//   Persona is locked on the project: keyframe, motion prompt and TTS
-//   voice all derive from it (worker/src/personas.js).
-// Without Modal endpoints the job completes in labelled demo mode ($0).
-const volumeBasename = (u) => (u ? String(u).split("/").pop() : null);
-
+//   storyboard scenes -> persona keyframe -> SAM QC -> per scene: local
+//   Nigerian voice FIRST (its real duration_s sizes the clip) -> Wan 2.2 /
+//   LTX silent motion -> stitch muxes voice onto picture -> verify -> export.
+// Persona is locked on the project: keyframe, motion prompt and TTS voice
+// all derive from it (worker/src/personas.js).
+//
+// STATELESS STEP MACHINE (contract §3, Workers free plan): POST /generate
+// only validates + creates the job (202). Each GET /api/jobs/:jid performs
+// at most ONE external call (one Muse Image, one SAM frame, one voice, one
+// Modal spawn or one non-blocking result check) under a D1 lock, persists
+// and returns. Free/demo steps chain within one poll, so a demo job
+// completes in a poll or two. Without Modal endpoints the job completes in
+// labelled demo mode ($0).
 function endpoints(env) {
   // Bindings may be undefined in in-process/test contexts — degrade to demo
   // mode instead of throwing a bare TypeError on property access.
   const e = env || {};
   return {
     tts: e.MODAL_TTS_ENDPOINT, yarn: e.MODAL_YARN_ENDPOINT,
-    h3: e.MODAL_H3_ENDPOINT, h3Result: e.MODAL_H3_RESULT_ENDPOINT,
     wan: e.MODAL_WAN_ENDPOINT, wanResult: e.MODAL_WAN_RESULT_ENDPOINT,
     stitch: e.MODAL_STITCH_ENDPOINT, stitchResult: e.MODAL_STITCH_RESULT_ENDPOINT,
   };
 }
 
 async function speakLocal(env, EP, { text, language, persona }) {
-  // Returns {audio_url, audio_volume_path, engine, voice, warning?}
+  // Returns {audio_url, audio_volume_path, duration_s, engine, voice, warning?}
   const route = voiceRoute(language, persona);
   if (route.source === "yarn") {
     if (!EP.yarn) throw new Error("MODAL_YARN_ENDPOINT not set (YarnGPT voice app)");
-    const out = await modalCall(EP.yarn, { text, language, voice: route.voice, gender: persona.gender });
-    if (out.error) throw new Error(`voice: ${out.error}`);
+    const out = await modalCall(env, EP.yarn, { text, language, voice: route.voice, gender: persona.gender }, { timeoutMs: VOICE_TIMEOUT_MS });
+    if (out.error) throw new Error(`voice: ${String(out.error).slice(0, 200)}`);
     return { ...out, warning: route.warning };
   }
   if (!EP.tts) throw new Error("MODAL_TTS_ENDPOINT not set (MMS voice app)");
-  const out = await modalCall(EP.tts, { text, language });
-  if (out.error) throw new Error(`voice: ${out.error}`);
+  const out = await modalCall(env, EP.tts, { text, language }, { timeoutMs: VOICE_TIMEOUT_MS });
+  if (out.error) throw new Error(`voice: ${String(out.error).slice(0, 200)}`);
   return { ...out, warning: route.warning };
 }
 
 // One Muse Image still for one scene (persona-locked; cached so the same
-// scene prompt is never paid for twice). Shared by /keyframes and by
-// /generate, which auto-creates any missing still so a live run can never
-// silently bypass Muse Image (hackathon: Meta must be visibly in the flow).
+// scene prompt is never paid for twice). Shared by /keyframes and by the
+// generate step machine, which auto-creates any missing still so a live run
+// can never silently bypass Muse Image.
 async function keyframeForScene(env, p, persona, scene) {
   const look = scene.visual || persona.look_default || persona.look_yoruba || "";
   const prompt = `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, visible skin pores, natural imperfections, natural light. ${look}. Product: ${p.name} — ${p.description}. Shot: ${scene.shot}. NOT plastic skin, NOT airbrushed, NOT CGI, no beauty filter, vertical 9:16.`;
   const key = cacheKey("keyframe", prompt);
-  let url = cacheGet(key);
-  if (url) { await charge(env, "meta", "muse_image", p.id, { cached: true }); return { url, cached: true }; }
-  assertBudget("meta");
+  const hit = cacheGet(key);
+  if (hit) {
+    await charge(env, "meta", "muse_image", p.id, { cached: true });
+    return { frame: await storeKeyframe(env, p, scene.n, hit.url, hit.source), cached: true };
+  }
+  assertBudget("meta", "muse_image");
+  let url, source = "muse-image";
   try {
     url = await museImage(env, prompt);
   } catch (e) {
-    // Muse's filter occasionally rejects scene wording — retry once
-    // with a sanitised generic UGC prompt (same product, safe framing).
-    if (!String(e.message).includes("content_policy")) throw e;
+    // Muse's filter occasionally rejects scene wording — retry once with a
+    // sanitised setting but the SAME persona description (so the fallback
+    // still draws the locked creator, not a random face), marked "fallback".
+    if (e.code !== "content_policy") throw e;
+    await charge(env, "meta", "muse_image", p.id); // the rejected attempt is billed conservatively
+    assertBudget("meta", "muse_image");
     url = await museImage(env,
-      `Raw candid iPhone selfie photo of a Nigerian creator smiling and talking to camera in a bright everyday indoor setting, holding a product package, visible skin pores, natural light, vertical 9:16. Product: ${p.name}. NOT plastic skin, NOT airbrushed, NOT CGI.`);
+      `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, smiling and talking to camera in a bright everyday indoor setting, holding a product package, visible skin pores, natural light, vertical 9:16. Product: ${p.name}. NOT plastic skin, NOT airbrushed, NOT CGI.`);
+    source = "fallback";
   }
-  cacheSet(key, url);
   await charge(env, "meta", "muse_image", p.id);
-  return { url, cached: false };
+  if (!url) throw new Error("Muse Image returned no image");
+  cacheSet(key, { url, source });
+  return { frame: await storeKeyframe(env, p, scene.n, url, source), cached: false };
 }
 
-// Ensures every scene in `scenes` has a Muse Image still on the project.
-// Returns { created:number[], reused:number[], failed:number[], error }.
-// A failure never throws, but failed scenes are named: /generate renders
-// them only when a still exists, so the Wan/LTX app never crashes inside
-// Modal on a missing keyframe (whose error message there is opaque).
-async function ensureKeyframes(env, p, persona, scenes) {
-  const out = { created: [], reused: [], failed: [], error: null };
-  if (!has(env, "META_API_KEY")) { out.error = "META_API_KEY not set — Muse Image keyframes skipped."; out.failed = scenes.map((s) => s.n); return out; }
-  for (const s of scenes) {
-    if ((p.keyframes || []).some((f) => f.scene === s.n)) { out.reused.push(s.n); continue; }
-    try {
-      const { url } = await keyframeForScene(env, p, persona, s);
-      p.keyframes = [...(p.keyframes || []), { scene: s.n, keyframe_url: url }];
-      out.created.push(s.n);
-    } catch (e) {
-      out.failed.push(s.n);
-      out.error = `Muse Image keyframes failed for scene ${s.n} (${e.message}) — that scene will be skipped in the film.`;
-    }
+// SAM 3.1 QC (Meta, segmentation — NOT a video generator) for ONE frame:
+// one noun phrase per call ("person", "phone") so a broken/empty still is
+// caught BEFORE a paid Wan/LTX render. Advisory: recorded on p.segmentation;
+// a failure or zero-person frame warns but never blocks generation. Keyed
+// by image CONTENT hash (audit #8). Returns {result, called, error}.
+async function segmentFrame(env, p, f, { force = false } = {}) {
+  const digest = f.image_hash || contentHash(f.keyframe_url || f.keyframe_key);
+  const prior = (p.segmentation || []).find((r) => r.scene === f.scene);
+  if (!force && prior?.image_hash === digest) return { result: prior, called: false, error: null };
+  const url = await frameDataUrl(env, f);
+  if (!url) return { result: null, called: false, error: `scene ${f.scene}: keyframe image not readable — SAM QC skipped` };
+  const detections = {}; let called = false, error = null;
+  for (const phrase of ["person", "phone"]) {
+    const key = cacheKey("sam", phrase, digest);
+    let hit = cacheGet(key);
+    if (!hit) {
+      try {
+        assertBudget("meta", "sam_segment");
+        called = true;
+        hit = await samSegment(env, url, phrase);
+        cacheSet(key, hit);
+        await charge(env, "meta", "sam_segment", p.id);
+      } catch (e) { error = `SAM QC deferred: ${String(e.message).slice(0, 160)}`; hit = { phrase, detections: null, boxes: [] }; }
+    } else { await charge(env, "meta", "sam_segment", p.id, { cached: true }); }
+    detections[phrase] = hit.detections;
   }
-  await saveProject(env, p);
-  return out;
+  const result = { scene: f.scene, image_hash: digest, detections,
+    person_ok: detections.person == null ? null : detections.person > 0,
+    note: detections.person === 0 ? "No person detected in this keyframe — check the still before filming." : null };
+  p.segmentation = [...(p.segmentation || []).filter((r) => r.scene !== f.scene), result];
+  return { result, called, error };
 }
 
-// SAM 3.1 QC (Meta, segmentation — NOT a video generator): run one noun
-// phrase per frame ("person", "phone") over the project's keyframes so a
-// broken/empty still is caught BEFORE a paid Wan/LTX render, not after.
-// Advisory: detections are recorded on p.segmentation; a failure or a
-// zero-person frame warns but never blocks generation. Both the in-run
-// cache and persisted results are keyed by image CONTENT hash, so a
-// regenerated still is re-checked instead of inheriting the old frame's
-// verdict (audit #8). Returns { checked, results, error } — never throws.
-async function segmentKeyframes(env, p, { scenes = null, force = false } = {}) {
-  const out = { checked: 0, results: [], error: null };
-  const frames = (p.keyframes || []).filter((f) => !scenes || scenes.some((s) => s.n === f.scene));
-  if (!frames.length) return out;
-  if (!has(env, "META_API_KEY")) { out.error = "META_API_KEY not set — SAM QC skipped."; return out; }
-  const stored = new Map((p.segmentation || []).map((r) => [r.scene, r]));
-  const PHRASES = ["person", "phone"];
-  for (const f of frames) {
-    const url = String(f.keyframe_url || "");
-    if (!url.startsWith("data:image")) continue; // SAM needs media we control; skip remote refs
-    const digest = contentHash(url);
-    const prior = stored.get(f.scene);
-    if (!force && prior?.image_hash === digest) { out.results.push(prior); out.checked++; continue; }
-    const detections = {};
-    for (const phrase of PHRASES) {
-      const key = cacheKey("sam", phrase, digest);
-      let hit = cacheGet(key);
-      if (!hit) {
-        try { hit = await samSegment(env, url, phrase); cacheSet(key, hit); await charge(env, "meta", "sam_segment", p.id); }
-        catch (e) { out.error = `SAM QC deferred: ${e.message}`; hit = { phrase, detections: null, boxes: [] }; }
-      } else { await charge(env, "meta", "sam_segment", p.id, { cached: true }); }
-      detections[phrase] = hit.detections;
-    }
-    out.results.push({ scene: f.scene, image_hash: digest, detections,
-      person_ok: detections.person == null ? null : detections.person > 0,
-      note: detections.person === 0 ? "No person detected in this keyframe — check the still before filming." : null });
-    out.checked++;
-  }
-  p.segmentation = [...(p.segmentation || []).filter((r) => !out.results.some((o) => o.scene === r.scene)), ...out.results];
-  await saveProject(env, p);
-  return out;
+function scenePlan(p, sceneLimit) {
+  const all = p.storyboard?.scenes || [];
+  const scenes = sceneLimit ? all.slice(0, sceneLimit) : all;
+  const lines = p.script?.lines || [];
+  return scenes.map((s, i) => {
+    // Script lines are matched by scene NUMBER (an edited/reordered board
+    // must not pair scene 3's picture with scene 2's words); index is only
+    // the fallback for scripts that omit `scene`.
+    const line = lines.find((l) => Number(l.scene) === s.n) || lines[i] || { text: s.key_line, seconds: s.seconds };
+    return { n: s.n, purpose: s.purpose, shot: s.shot, visual: s.visual, key_line: s.key_line, seconds: s.seconds,
+      overlay: s.overlay || null, line: { scene: s.n, text: String(line.text || s.key_line || ""), seconds: Number(line.seconds) || Number(s.seconds) || 6 } };
+  });
+}
+
+function estimateJobUsd(engine, plan) {
+  const clipOp = engine === "ltx" ? "ltx_clip" : "wan_clip";
+  return +(plan.length * (estimateCost("modal", clipOp) + estimateCost("modal", "tts_scene")) + (plan.length ? estimateCost("modal", "stitch") : 0)).toFixed(2);
 }
 
 app.post("/api/projects/:pid/generate", async (c) => {
+  if (!c.get("authorized")) return accessRequired(c);
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
   if (!p.script) return c.json({ error: "Run script first" }, 400);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await readJson(c);
+  if (body === BAD_JSON) return badJson(c);
   const requestedEngine = String(body.engine || "wan").toLowerCase();
-  const engine = requestedEngine === "ltx" ? "ltx" : "wan"; // Wan primary; LTX cheapest. H3 is parked server-side, never submitted by this route.
+  const engine = requestedEngine === "ltx" ? "ltx" : "wan"; // H3 is parked server-side, never submitted by this route.
   const persona = getPersona(body.persona || p.persona || DEFAULT_PERSONA_ID);
-  p.persona = persona.id;
   const env = c.env;
   const EP = endpoints(env);
   // Live only when Wan/LTX spawn + result endpoints are both wired; otherwise
@@ -258,170 +595,349 @@ app.post("/api/projects/:pid/generate", async (c) => {
   const allScenes = p.storyboard?.scenes || [];
   const requestedLimit = Number(body.limit);
   const sceneLimit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 0), allScenes.length) : 0;
-  const scenes = sceneLimit ? allScenes.slice(0, sceneLimit) : allScenes;
-  const clipPaths = [], audioPaths = [], stitchedOverlays = [], stitchedLines = [], failedScenes = [];
-  const job = { id: id(), project_id: p.id, stage: "generate", engine, persona: persona.id, requested_engine: requestedEngine,
-    models: { research: MODEL_MAP.research, storyboard: MODEL_MAP.storyboard, script: MODEL_MAP.script,
-      keyframe: MODEL_MAP.keyframe, segment: MODEL_MAP.segment, voice: MODEL_MAP.voice,
-      video: MODEL_MAP.video[engine] || MODEL_MAP.video.wan, critic: MODEL_MAP.critic, stitch: MODEL_MAP.stitch,
-      verify: MODEL_MAP.verify },
-    audio_plan: "local-voice", scene_limit: sceneLimit,
-    status: "running", progress: 10, scenes: [] };
-  mem.jobs.set(job.id, job);
-  // Money gate (audit #4): the $50/credits.js caps must be able to stop a
-  // LIVE run before the first Modal submit, not just log it afterwards.
+  const plan = scenePlan(p, sceneLimit);
+  if (!plan.length) return c.json({ error: "Storyboard has no scenes" }, 400);
+
+  // Idempotency: one running generate job per project. A second click
+  // resumes the existing job instead of paying for a parallel render.
+  const running = await findRunningJob(env, p.id);
+  if (running) return c.json({ error: "job_running", job_id: running, note: "A generation job is already running for this project — poll it instead." }, 409);
+
+  // Money gate (audit #4): the WHOLE estimated job must fit the remaining
+  // budget before the first spawn; per-call checks still run at each step.
+  const estimate = live ? estimateJobUsd(engine, plan) : 0;
   if (live) {
-    try { assertBudget("modal"); } catch (e) {
-      job.status = "error"; job.error = e.message;
-      job.note = "Generation refused by the credit guard before any Modal submit.";
-      return c.json(job, 402);
-    }
+    try { assertBudgetUsd("modal", estimate, `${plan.length}-scene ${ENGINE_LABEL[engine]} job`); }
+    catch (e) { return c.json({ error: e.message, estimated_usd: estimate, note: "Generation refused by the credit guard before any Modal submit — try a smaller scene limit." }, 402); }
   }
-  try {
-    // 0) Muse Image keyframes first: every live run must show Meta in the
-    //    flow, so missing stills are created here even if the user never
-    //    pressed "Generate keyframes" in the Studio.
-    job.models.keyframe_status = live ? await ensureKeyframes(env, p, persona, scenes) : { created: [], reused: [], error: null };
-    // 0b) SAM 3.1 QC gate (advisory): confirm each still actually contains
-    //     a person before paying for its render. Cheap Meta call, cached.
-    job.models.segment_status = live ? await segmentKeyframes(env, p, { scenes }) : { checked: 0, results: [], error: null };
-    for (let i = 0; i < scenes.length; i++) {
-      const scene = scenes[i];
-      const line = p.script?.lines?.[i] || { text: scene.key_line, seconds: scene.seconds };
-      let clipUrl = null, mode = live ? "live" : "demo", audioUrl = null, voiceInfo = null;
-      // The whole-scene overlay slot (audit #11): editor intent -> real file.
-      // Overlay assets are REAL uploads only (never AI-drawn). Until the
-      // Studio upload lands they are null; the job keeps `overlay` (intent)
-      // separate from what stitch actually composited.
-
-      // 1) Local voice FIRST (all languages on Wan/LTX, which are silent):
-      //    its real duration sizes the motion clip, and stitch muxes it in.
-      //    A missing voice endpoint degrades to "voice pending" — it must
-      //    never kill an otherwise-working video job.
-      let localAudio = null;
-      if (live) {
-        try {
-          localAudio = await speakLocal(env, EP, { text: line.text, language: p.language, persona });
-        } catch (e) {
-          voiceInfo = { engine: "voice-pending", voice: null, warning: `Local voice unavailable (${e.message}) — clip rendered silent for this scene.` };
-        }
-        if (localAudio) {
-          await charge(env, "modal", "tts_scene", p.id);
-          audioUrl = localAudio.audio_url; voiceInfo = localAudio;
-        }
-      }
-
-      // 2) Video clip per storyboard scene. A failed scene must NOT kill
-      //    the film (audit #1): scenes that already rendered are stitched
-      //    into a partial cut, failures are named on the job, and the
-      //    completed work is never thrown away. A scene with no keyframe
-      //    is skipped here instead of crashing inside the Modal app
-      //    (audit #9); its voice, if any, still ships in the run record.
-      if (live) {
-        try {
-          const frame = (p.keyframes || []).find((f) => f.scene === scene.n);
-          if (!frame?.keyframe_url) throw new Error(`no Muse Image keyframe for scene ${scene.n} — scene skipped (see keyframe_status)`);
-          const b64 = String(frame.keyframe_url).split(",").pop();
-          const seconds = Math.min(Math.max(Number(line.seconds) || 6, 5), 15);
-          const out = await modalJobCall(EP.wan, EP.wanResult, { engine, keyframe_b64: b64,
-            prompt: `${persona.h3_description}. ${scene.visual}. Natural talking-head UGC motion, looking into camera, relaxed gestures, no text, no logo.`,
-            seconds,
-            project: { name: p.name, language: p.language } });
-          await charge(env, "modal", engine === "wan" ? "wan_clip" : "ltx_clip", p.id);
-          if (out.error) throw new Error(`${engine} scene ${scene.n}: ${out.error}`);
-          clipUrl = out.clip_url;
-          mode = "live";
-          clipPaths.push(out.clip_volume_path || volumeBasename(clipUrl));
-          audioPaths.push(localAudio?.audio_volume_path || null);
-          stitchedOverlays.push(scene.overlay || null);
-          stitchedLines.push(line);
-        } catch (e) {
-          mode = "failed";
-          failedScenes.push({ scene: scene.n, error: e.message });
-          voiceInfo = voiceInfo ?? { engine: "voice-pending", voice: null, warning: null };
-        }
-      }
-
-      // 3) Critic gate (advisory until frame-aware critic lands — verdicts
-      //    are shown per scene; generation is not silently blocked).
-      let verdict = null;
-      for (let attempt = 1; attempt <= LIMITS.criticRetriesPerScene; attempt++) {
-        verdict = await criticAgent(env, p, scene, attempt);
-        if (verdict.verdict === "pass") break;
-      }
-      job.scenes.push({ scene: scene.n, engine, mode, clip_url: clipUrl, audio_url: audioUrl, overlay: scene.overlay || null,
-        overlay_status: scene.overlay ? "intent recorded — a real uploaded proof asset is required before stitch can composite it" : null,
-        voice: voiceInfo ? { engine: voiceInfo.engine, voice: voiceInfo.voice, warning: voiceInfo.warning || null } : { engine: "voice-pending" },
-        critic: verdict });
-      job.progress = 10 + Math.round(((i + 1) / Math.max(scenes.length, 1)) * 80);
-    }
-    if (live && clipPaths.length && EP.stitch) {
-      try {
-        assertBudget("modal");
-        const stitched = await modalJobCall(EP.stitch, EP.stitchResult, {
-          clip_volume_paths: clipPaths,
-          audio_volume_paths: audioPaths,
-          overlays: stitchedOverlays,
-          lines: stitchedLines,
-          project_id: p.id,
-        }, { timeoutMs: 600000 }); // stitch app itself times out at 600s (audit #13)
-        await charge(env, "modal", "stitch", p.id);
-        job.final_video_url = stitched.final_video_url || null;
-        job.final_volume_path = stitched.final_volume_path || null;
-        job.overlays_applied = stitched.overlays_applied ?? null;
-      } catch (e) { job.stitch_error = e.message; } // rendered scenes survive a stitch failure too
-    }
-    if (live && failedScenes.length) job.failed_scenes = failedScenes;
-    job.status = (live && clipPaths.length === 0 && scenes.length > 0) ? "error" : "complete";
-    job.progress = job.status === "complete" ? 100 : 90;
-    job.note = live
-      ? (failedScenes.length
-          ? `Partial film: ${clipPaths.length}/${scenes.length} scenes rendered; scenes ${failedScenes.map((f) => f.scene).join(", ")} failed and were left out rather than killing the whole run. Finished media is preserved for the posting package.`
-          : `${engine === "wan" ? "Wan 2.2" : "LTX 2.5"} picture (silent motion) + local Nigerian voice muxed at stitch — the winning-UGC voiceover format. Media lives in the talla-outputs volume until R2 keys are set.`)
-      : "Demo mode: Wan/LTX Modal endpoints are not configured. No media credits were spent on this job.";
-  } catch (e) {
-    job.status = "error"; job.error = e.message;
-    job.note = "Generation stopped — see error. Completed scenes are kept above.";
-  }
-  p.status = job.status === "complete" ? "generated" : job.status === "error" ? "generate_error" : p.status;
-  // Optional final step: attach a ready-to-post export package (caption in
-  // the video's language + hashtags + video ref). Best-effort — a caption
-  // failure must never fail a completed film. Also available standalone at
-  // POST /api/projects/:pid/export for manual/copy-only use.
-  if (job.status === "complete") {
-    // Verify: transcribe the FIRST shipped voice track against ITS OWN
-    // script line (audit #7 — comparing one scene's audio to the whole
-    // script would understate similarity on every multi-scene job).
-    const firstScene = job.scenes.find((s) => s.audio_url);
-    const firstLine = firstScene ? (p.script?.lines || []).find((l) => l.scene === firstScene.scene) : null;
-    job.verification = await verifySpoken(env, p, firstScene?.audio_url || null,
-      firstLine?.text || (p.script?.lines || [])[0]?.text || "", p.language);
-    job.verification.scope = firstScene ? `scene ${firstScene.scene} vs its script line` : "no shipped voice";
-    try { job.posting_package = await exportAgent(env, p, job); } catch {}
-  }
+  p.persona = persona.id;
   await saveProject(env, p);
-  return c.json(job, 201);
+
+  const job = { id: crypto.randomUUID(), project_id: p.id, stage: "generate", engine, persona: persona.id, requested_engine: requestedEngine,
+    status: "running", progress: 1, step: "Queued", mode: live ? "live" : "demo",
+    audio_plan: "local-voice", scene_limit: sceneLimit, estimated_usd: estimate,
+    scenes: [], models: {}, created_at: new Date().toISOString(),
+    note: live ? "Queued — poll GET /api/jobs/:id every ~5 s; each poll advances one step."
+      : "Demo mode: Wan/LTX Modal endpoints are not configured. No media credits will be spent on this job.",
+    state: { live, phase: live ? "keyframes" : "voice", i: 0, language: p.language, plan,
+      work: plan.map(() => ({})), clipPaths: [], audioPaths: [], overlays: [], lines: [],
+      kf: { created: [], reused: [], failed: [], fallback: [], error: null }, qc: { checked: 0, called: 0, errors: [] },
+      voiceTried: 0, voiceOk: 0, budgetStop: null } };
+  try { await saveJob(env, job, { create: true }); }
+  catch (e) {
+    if (/UNIQUE/i.test(String(e?.message))) {
+      const again = await findRunningJob(env, p.id);
+      return c.json({ error: "job_running", job_id: again, note: "A generation job is already running for this project." }, 409);
+    }
+    return failure(c, "generate", e);
+  }
+  return c.json({ ...publicJob(job), poll_url: `/api/jobs/${job.id}` }, 202);
+});
+
+function setStep(job, text, progress) {
+  job.step = text;
+  if (progress != null) job.progress = Math.max(job.progress || 0, Math.min(99, Math.round(progress)));
+}
+const isBudget = (e) => String(e?.message || "").startsWith("BUDGET_EXHAUSTED");
+
+// Runs ONE step. Returns true when an external (possibly paid) call was
+// made, so the runner stops and persists; free steps chain.
+async function runStep(env, job, p) {
+  const st = job.state, EP = endpoints(env), N = st.plan.length;
+  const persona = getPersona(job.persona);
+  const label = ENGINE_LABEL[job.engine];
+  const clipOp = job.engine === "ltx" ? "ltx_clip" : "wan_clip";
+  const s = st.plan[st.i], w = st.work[st.i];
+  const sceneProgress = (frac) => 20 + ((st.i + frac) / Math.max(N, 1)) * 65;
+
+  switch (st.phase) {
+    case "keyframes": { // 0) Muse Image stills (Meta must be visibly in every live run)
+      if (!s) { st.phase = "qc"; st.i = 0; return false; }
+      setStep(job, `Drawing keyframe ${st.i + 1} of ${N} (Muse Image)`, 2 + (st.i / N) * 13);
+      if (frameFor(p, s.n)) { st.kf.reused.push(s.n); st.i++; return false; }
+      if (!has(env, "META_API_KEY")) { st.kf.failed.push(s.n); st.kf.error = "META_API_KEY not set — Muse Image keyframes skipped."; st.i++; return false; }
+      try {
+        const { frame, cached } = await keyframeForScene(env, p, persona, s);
+        (cached ? st.kf.reused : st.kf.created).push(s.n);
+        if (frame.source === "fallback") st.kf.fallback.push(s.n);
+        st.i++; return !cached;
+      } catch (e) {
+        st.kf.failed.push(s.n);
+        st.kf.error = `Muse Image keyframe failed for scene ${s.n} (${String(e.message).slice(0, 120)}) — that scene will be skipped in the film.`;
+        st.i++; return !isBudget(e);
+      }
+    }
+    case "qc": { // 0b) SAM 3.1 QC gate (advisory), one frame per step
+      if (!s) { st.phase = "voice"; st.i = 0; return false; }
+      setStep(job, `Checking keyframe ${st.i + 1} of ${N} (SAM 3.1 QC)`, 15 + (st.i / N) * 5);
+      const f = frameFor(p, s.n);
+      st.i++;
+      if (!f || !has(env, "META_API_KEY")) return false;
+      const r = await segmentFrame(env, p, f);
+      st.qc.checked++; if (r.called) st.qc.called++;
+      if (r.error) st.qc.errors.push(r.error);
+      return r.called;
+    }
+    case "voice": { // 1) local voice FIRST: its real duration sizes the clip
+      if (!s) { st.phase = "stitch_spawn"; return false; }
+      if (!st.live) { st.phase = "critic"; return false; } // demo: no voice, no video
+      setStep(job, `Recording voice for scene ${st.i + 1} of ${N}`, sceneProgress(0));
+      if (st.budgetStop) { w.failed = `skipped — ${st.budgetStop}`; st.phase = "critic"; return false; }
+      // No still -> skip BEFORE paying for its voice (audit #9).
+      if (!frameFor(p, s.n)) { w.failed = `no Muse Image keyframe for scene ${s.n} — scene skipped (see keyframe_status)`; st.phase = "critic"; return false; }
+      st.voiceTried++;
+      try {
+        assertBudget("modal", "tts_scene");
+        const out = await speakLocal(env, EP, { text: s.line.text, language: st.language, persona });
+        await charge(env, "modal", "tts_scene", job.project_id);
+        st.voiceOk++;
+        w.audio_volume_path = out.audio_volume_path || volumeBasename(out.audio_url);
+        w.duration_s = Number(out.duration_s) || null;
+        w.voice = { engine: out.engine || "local", voice: out.voice || null, warning: out.warning || null, duration_s: w.duration_s };
+      } catch (e) {
+        if (e.ambiguous) await charge(env, "modal", "tts_scene", job.project_id); // may have run on the GPU
+        if (isBudget(e)) { st.budgetStop = e.message; w.failed = `skipped — ${e.message}`; st.phase = "critic"; return false; }
+        // A missing voice degrades to "voice pending" — it must never kill
+        // an otherwise-working video job.
+        w.voice = { engine: "voice-pending", voice: null, warning: `Local voice unavailable (${String(e.message).slice(0, 120)}) — clip rendered silent for this scene.` };
+      }
+      st.phase = "video_spawn";
+      return true;
+    }
+    case "video_spawn": { // 2) one Wan/LTX spawn — charged AT SPAWN, never lost
+      setStep(job, `Rendering scene ${st.i + 1} of ${N} (${label})`, sceneProgress(0.2));
+      const cap = ENGINE_CAP_S[job.engine];
+      const seconds = +Math.max(2, Math.min(w.duration_s || s.line.seconds || 5, cap)).toFixed(2);
+      w.seconds = seconds;
+      try {
+        assertBudget("modal", clipOp);
+        const frame = frameFor(p, s.n);
+        const dataUrl = await frameDataUrl(env, frame);
+        if (!dataUrl) throw new Error(`keyframe for scene ${s.n} is not readable`);
+        let out;
+        try {
+          out = await modalCall(env, EP.wan, { engine: job.engine, keyframe_b64: dataUrl.split(",").pop(),
+            prompt: `${persona.h3_description}. ${s.visual || ""}. Natural talking-head UGC motion, looking into camera, relaxed gestures, no text, no logo.`,
+            seconds, project: { name: p.name, language: st.language } }, { timeoutMs: 60000 });
+        } catch (e) { if (e.ambiguous) await charge(env, "modal", clipOp, job.project_id); throw e; }
+        await charge(env, "modal", clipOp, job.project_id);
+        if (out.error) throw new Error(`${job.engine} scene ${s.n}: ${String(out.error).slice(0, 160)}`);
+        if (out.call_id) { w.call_id = out.call_id; w.spawned_at = Date.now(); st.phase = "video_poll"; }
+        else { acceptClip(st, s, w, out); st.phase = "critic"; } // sync-style endpoint already returned the clip
+      } catch (e) {
+        if (isBudget(e)) st.budgetStop = e.message;
+        w.failed = String(e.message).slice(0, 200);
+        st.phase = "critic";
+        return !isBudget(e);
+      }
+      return true;
+    }
+    case "video_poll": { // non-blocking single result check
+      const elapsed = Math.round((Date.now() - (w.spawned_at || Date.now())) / 1000);
+      setStep(job, `Rendering scene ${st.i + 1} of ${N} (${label}) — ${elapsed}s`, sceneProgress(0.2 + Math.min(elapsed / 600, 1) * 0.7));
+      const r = await modalPollOnce(env, EP.wanResult, w.call_id);
+      if (r.status === "complete") {
+        if (r.error) w.failed = `${job.engine} scene ${s.n}: ${String(r.error).slice(0, 160)}`;
+        else acceptClip(st, s, w, r);
+        st.phase = "critic";
+      } else if (r.status === "error") {
+        w.failed = `${job.engine} scene ${s.n}: ${String(r.error || "Modal job failed").slice(0, 160)}`; st.phase = "critic";
+      } else if (Date.now() - w.spawned_at > 25 * 60 * 1000) {
+        w.failed = `${job.engine} scene ${s.n}: timed out after 25 min (call ${w.call_id})`; st.phase = "critic";
+      }
+      return true;
+    }
+    case "critic": { // 3) plan/script critic — advisory, can never kill paid clips
+      setStep(job, `Reviewing scene ${st.i + 1} of ${N} (${CRITIC_LABEL})`, sceneProgress(0.95));
+      let verdict;
+      try { verdict = await criticAgent(env, p, s, 1); }
+      catch (e) {
+        console.error("[critic]", e?.message || e);
+        verdict = { mode: "unavailable", label: CRITIC_LABEL, scene: s.n, verdict: "unavailable", note: isBudget(e) ? e.message : "Critic unavailable — clip kept." };
+      }
+      job.scenes.push({ scene: s.n, engine: job.engine,
+        mode: !st.live ? "demo" : w.clip_volume_path ? "live" : "failed",
+        clip_url: w.clip_url || null, audio_url: mediaUrl(w.audio_volume_path) || null,
+        seconds: w.seconds || null, overlay: s.overlay || null,
+        overlay_status: s.overlay ? "intent recorded — a real uploaded proof asset is required before stitch can composite it" : null,
+        voice: w.voice || { engine: st.live ? "voice-pending" : "demo", voice: null, warning: null },
+        critic: verdict, error: w.failed || null });
+      if (w.failed) (job.failed_scenes = job.failed_scenes || []).push({ scene: s.n, error: w.failed });
+      st.i++;
+      st.phase = st.i < N ? "voice" : "stitch_spawn";
+      return verdict.mode === "live";
+    }
+    case "stitch_spawn": {
+      if (!st.live || !st.clipPaths.length) { st.phase = "verify"; return false; }
+      if (!EP.stitch) { job.stitch_error = "MODAL_STITCH_ENDPOINT not set — clips rendered but not stitched."; st.phase = "verify"; return false; }
+      setStep(job, "Stitching the film (voice + captions + AI label)", 86);
+      try {
+        assertBudget("modal", "stitch");
+        let out;
+        try {
+          out = await modalCall(env, EP.stitch, { clip_volume_paths: st.clipPaths, audio_volume_paths: st.audioPaths,
+            overlays: st.overlays, lines: st.lines, project_id: job.project_id }, { timeoutMs: 60000 });
+        } catch (e) { if (e.ambiguous) await charge(env, "modal", "stitch", job.project_id); throw e; }
+        await charge(env, "modal", "stitch", job.project_id);
+        if (out.error) throw new Error(`stitch: ${String(out.error).slice(0, 160)}`);
+        if (out.call_id) {
+          if (!EP.stitchResult) throw new Error("MODAL_STITCH_RESULT_ENDPOINT not set — cannot collect the stitched film");
+          st.stitch = { call_id: out.call_id, spawned_at: Date.now() }; st.phase = "stitch_poll";
+        } else { acceptFinal(job, out); st.phase = "verify"; }
+      } catch (e) { job.stitch_error = String(e.message).slice(0, 200); st.phase = "verify"; return !isBudget(e); } // rendered scenes survive a stitch failure
+      return true;
+    }
+    case "stitch_poll": {
+      setStep(job, "Stitching the film (voice + captions + AI label)", 90);
+      const r = await modalPollOnce(env, EP.stitchResult, st.stitch.call_id);
+      if (r.status === "complete") { if (r.error) job.stitch_error = String(r.error).slice(0, 200); else acceptFinal(job, r); st.phase = "verify"; }
+      else if (r.status === "error") { job.stitch_error = String(r.error || "stitch failed").slice(0, 200); st.phase = "verify"; }
+      else if (Date.now() - st.stitch.spawned_at > 12 * 60 * 1000) { job.stitch_error = "stitch timed out after 12 min"; st.phase = "verify"; } // stitch app itself times out at 600 s
+      return true;
+    }
+    case "verify": {
+      if (st.live && st.clipPaths.length === 0) { finishJob(job, p, "error"); return false; }
+      // Verify: transcribe the FIRST shipped voice track against ITS OWN
+      // script line (audit #7 — one scene's audio vs the whole script would
+      // understate similarity on every multi-scene job).
+      setStep(job, "Verifying the spoken words (Muse Voice Transcribe)", 95);
+      const idx = st.work.findIndex((x) => x.audio_volume_path && x.clip_volume_path);
+      const ref = idx >= 0 ? st.work[idx].audio_volume_path : null;
+      job.verification = await verifySpoken(env, p, ref, idx >= 0 ? st.plan[idx].line.text : (st.plan[0]?.line.text || ""), st.language);
+      job.verification.scope = idx >= 0 ? `scene ${st.plan[idx].n} vs its script line` : "no shipped voice";
+      st.phase = "export";
+      return job.verification.status === "complete" || job.verification.status === "deferred";
+    }
+    case "export": {
+      // Ready-to-post package — best-effort, a caption failure must never
+      // fail a completed film.
+      setStep(job, "Preparing the posting package", 98);
+      try { job.posting_package = await exportAgent(env, p, job); }
+      catch (e) { console.error("[export]", e?.message || e); job.posting_package = null; job.export_error = isBudget(e) ? e.message : "export unavailable"; }
+      finishJob(job, p, "complete");
+      return job.posting_package?.mode === "live";
+    }
+    default:
+      finishJob(job, p, job.status === "running" ? "error" : job.status);
+      return false;
+  }
+}
+
+function acceptClip(st, s, w, out) {
+  const name = out.clip_volume_path || volumeBasename(out.clip_url);
+  if (!name) { w.failed = `scene ${s.n}: engine returned no clip path`; return; }
+  w.clip_volume_path = name;
+  w.clip_url = mediaUrl(volumeBasename(name)) || (/^https?:/.test(out.clip_url || "") ? out.clip_url : null);
+  st.clipPaths.push(name);
+  st.audioPaths.push(w.audio_volume_path || null);
+  st.overlays.push(s.overlay || null);
+  st.lines.push(s.line);
+}
+function acceptFinal(job, out) {
+  job.final_video_url = out.final_video_url || null;
+  job.final_volume_path = out.final_volume_path || null;
+  job.final_media_url = mediaUrl(volumeBasename(out.final_volume_path || out.final_video_url));
+  job.overlays_applied = out.overlays_applied ?? null;
+}
+
+// job.models lists ONLY stages that actually ran: {model, used, detail}.
+function buildModels(job, p) {
+  const st = job.state, m = {};
+  for (const k of ["research", "storyboard", "script"]) {
+    const mode = p[k]?.mode;
+    if (p[k]) m[k] = { model: MODEL_MAP[k], used: mode === "live", detail: mode === "live" ? undefined : `${mode || "edited"} output (no live model call)` };
+  }
+  if (st.live) {
+    m.keyframe = { model: MODEL_MAP.keyframe, used: st.kf.created.length > 0,
+      detail: `created [${st.kf.created}] reused [${st.kf.reused}] failed [${st.kf.failed}]${st.kf.fallback.length ? ` fallback-prompt [${st.kf.fallback}]` : ""}` };
+    if (st.qc.checked) m.segment = { model: MODEL_MAP.segment, used: st.qc.called > 0, detail: `${st.qc.checked} frame(s) checked, ${st.qc.called} live` };
+    if (st.voiceTried) m.voice = { model: MODEL_MAP.voice, used: st.voiceOk > 0, detail: `${st.voiceOk}/${st.voiceTried} scene voice(s) recorded` };
+    m.video = { model: MODEL_MAP.video[job.engine], used: st.clipPaths.length > 0, detail: `${st.clipPaths.length}/${st.plan.length} scene(s) rendered` };
+    if (st.stitch || job.final_volume_path || job.stitch_error) m.stitch = { model: MODEL_MAP.stitch, used: Boolean(job.final_volume_path), detail: job.stitch_error || undefined };
+  }
+  const liveCritic = job.scenes.some((x) => x.critic?.mode === "live");
+  m.critic = { model: MODEL_MAP.critic, used: liveCritic, detail: liveCritic ? "judges plan + script text only, never frames" : "deterministic demo check (line length vs seconds)" };
+  if (job.verification && job.verification.status !== "skipped") m.verify = { model: MODEL_MAP.verify, used: job.verification.status === "complete", detail: job.verification.note || undefined };
+  if (job.posting_package) m.export = { model: MODEL_MAP.export, used: job.posting_package.mode === "live" };
+  return m;
+}
+
+function finishJob(job, p, status) {
+  const st = job.state, N = st.plan.length, rendered = st.clipPaths.length;
+  job.status = status;
+  job.progress = status === "complete" ? 100 : Math.max(job.progress || 0, 90);
+  job.step = status === "complete" ? "Complete" : "Stopped";
+  job.keyframe_status = st.live ? { ...st.kf } : null;
+  job.segment_status = st.live ? { checked: st.qc.checked, errors: st.qc.errors } : null;
+  if (status === "error" && !job.error) job.error = st.budgetStop || "No scene rendered — see failed_scenes.";
+  const failed = job.failed_scenes || [];
+  job.note = !st.live
+    ? "Demo mode: Wan/LTX Modal endpoints are not configured. No media credits were spent on this job — scenes are labelled demo and carry no clips."
+    : status === "error" ? "Generation stopped — no scene rendered. See failed_scenes / error. Charges for any spawned calls are recorded."
+    : failed.length
+      ? `Partial film: ${rendered}/${N} scenes rendered; scenes ${failed.map((f) => f.scene).join(", ")} failed and were left out rather than killing the whole run.`
+      : `${ENGINE_LABEL[job.engine]} picture (silent motion) + local Nigerian voice muxed at stitch — the winning-UGC voiceover format.`;
+  job.models = buildModels(job, p);
+  p.status = status === "complete" ? "generated" : "generate_error";
+}
+
+// Advance a running job: free steps chain, the first external call ends
+// this poll (so one request never does two paid things).
+async function advanceJob(env, job) {
+  const p = await getProject(env, job.project_id);
+  if (!p) { job.status = "error"; job.error = "Project not found"; return; }
+  try {
+    for (let n = 0; n < 60 && job.status === "running"; n++) {
+      if (await runStep(env, job, p)) break;
+    }
+  } catch (e) {
+    // Unexpected bug in a step: stop the job but keep everything rendered.
+    console.error("[job]", job.id, e);
+    job.error = `step ${job.state?.phase} failed: ${String(e?.message || e).slice(0, 160)}`;
+    finishJob(job, p, "error");
+  }
+  if (job.status === "running") job.models = buildModels(job, p);
+  await saveProject(env, p);
+}
+
+app.get("/api/jobs/:jid", async (c) => {
+  // Steps run with the RAW env: the job was authorised and budget-gated at
+  // creation, so an anonymous poll may advance it but never widen it.
+  const env = c.get("raw_env");
+  const jid = c.req.param("jid");
+  let job = await getJob(env, jid);
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  if (job.status === "running" && job.state && await acquireLock(env, jid)) {
+    try {
+      job = (await getJob(env, jid)) || job; // re-read under the lock: another poll may have just stepped
+      if (job.status === "running") { await advanceJob(env, job); await saveJob(env, job); }
+    } finally { await releaseLock(env, jid); }
+  }
+  return c.json(publicJob(job));
 });
 
 // Verify (Muse Voice Transcribe): transcribe the SPOKEN audio that will
 // actually ship and compare it against the script, so "the video says our
-// exact words" is checked, not assumed. The audio may live in the Modal
-// volume (modal-volume://) — then we fetch it via the TTS app's own
-// volume-mount path if present, else honestly defer. NEVER throws: a
-// verify failure must not fail a completed film.
+// exact words" is checked, not assumed. The voice lives in the Modal
+// volume; it is fetched through the token-gated file endpoint. NEVER
+// throws: a verify failure must not fail a completed film.
 async function verifySpoken(env, p, audioRef, expectedText, language) {
   const out = { status: "skipped", expected: expectedText || "", heard: null, similarity: null, words: null, note: null };
   if (!has(env, "META_API_KEY")) { out.note = "META_API_KEY not set — verify skipped."; return out; }
   if (!audioRef) { out.note = "No local voice track was produced for this job, so transcription verify has nothing to compare against the script."; return out; }
   try {
     let b64 = null;
+    const name = volumeBasename(audioRef);
     if (String(audioRef).startsWith("data:audio")) b64 = String(audioRef).split(",").pop();
-    else if (/^https?:/.test(audioRef)) {
-      const res = await fetch(audioRef); const buf = new Uint8Array(await res.arrayBuffer());
-      b64 = Buffer.from(buf).toString("base64");
+    else if (MEDIA_NAME.test(name || "") && env.MODAL_FILE_ENDPOINT) {
+      const res = await modalFile(env, name);
+      if (!res?.ok) throw new Error(`voice file fetch ${res?.status}`);
+      b64 = bytesToBase64(new Uint8Array(await res.arrayBuffer()));
     }
-    if (!b64) { out.note = `Voice lives in the Modal volume (${audioRef}) — transcription runs when the audio is served over HTTP (R2). Deferred, not faked.`; return out; }
+    if (!b64) { out.status = "deferred"; out.note = `Voice lives in the Modal volume (${name}) and MODAL_FILE_ENDPOINT is not set — deferred, not faked.`; return out; }
+    assertBudget("meta", "muse_transcribe");
     const { text, words } = await museTranscribe(env, b64, { language });
+    await charge(env, "meta", "muse_transcribe", p.id);
     out.heard = text; out.words = words;
     // crude word-overlap similarity (cheap honesty signal, not a metric claim)
     const norm = (s) => new Set(String(s || "").toLowerCase().replace(/[^a-z0-9à-ÿ\s]/g, " ").split(/\s+/).filter(Boolean));
@@ -429,94 +945,119 @@ async function verifySpoken(env, p, audioRef, expectedText, language) {
     if (a.size) { let hit = 0; for (const w of a) if (b.has(w)) hit++; out.similarity = Math.round((hit / a.size) * 100) / 100; }
     out.status = "complete";
     out.note = words?.length ? `Transcribed with word-level timestamps (${words.length} words).` : "Transcribed (no word timestamps returned by this model response).";
-  } catch (e) { out.status = "deferred"; out.note = `Verify deferred: ${e.message} — the API's transcription wire format is probed at runtime; generation is unaffected.`; }
+  } catch (e) { out.status = "deferred"; out.note = `Verify deferred: ${String(e.message).slice(0, 160)} — generation is unaffected.`; }
   return out;
 }
 
 // Export for Posting (standalone, optional): build/refresh the posting
 // package for the latest job without regenerating any media. Works in demo
-// mode too — the caption/hashtags are prepared from script + research, the
-// user copies and posts manually (no social APIs, no auto-posting).
+// mode too — the user copies and posts manually (no social APIs).
 app.post("/api/projects/:pid/export", async (c) => {
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
   if (!p.script) return c.json({ error: "Run script first — the export caption is written from your script." }, 400);
-  const body = await c.req.json().catch(() => ({}));
-  const job = body.job_id ? mem.jobs.get(body.job_id) : [...mem.jobs.values()].filter((j) => j.project_id === p.id).pop();
+  const body = await readJson(c);
+  if (body === BAD_JSON) return badJson(c);
+  const rawEnv = c.get("raw_env");
+  let job = null;
+  if (body.job_id) {
+    job = await getJob(rawEnv, String(body.job_id));
+    // A job id from ANOTHER project must not leak that project's media refs.
+    if (!job || job.project_id !== p.id) return c.json({ error: "Job not found for this project" }, 404);
+  } else job = await latestJob(rawEnv, p.id);
   try {
     const pkg = await exportAgent(c.env, p, job);
-    if (job) job.posting_package = pkg;
+    if (job && job.status !== "running") { job.posting_package = pkg; await saveJob(rawEnv, job); }
     return c.json({ project_id: p.id, job_id: job?.id || null, posting_package: pkg });
-  } catch (e) { return c.json({ error: `export failed: ${e.message}` }, 502); }
+  } catch (e) { return failure(c, "export", e); }
 });
 
 // Voice preview: hear the persona's local voice on one line BEFORE filming,
 // so a face/voice mismatch is caught in the Studio, not in the final video.
 app.post("/api/projects/:pid/voice-preview", async (c) => {
+  if (!c.get("authorized")) return accessRequired(c);
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await readJson(c);
+  if (body === BAD_JSON) return badJson(c);
   const persona = getPersona(body.persona || p.persona || DEFAULT_PERSONA_ID);
-  const text = body.text || p.script?.lines?.[0]?.text || p.storyboard?.scenes?.[0]?.key_line
-    || "Na this one finally solve am, no wahala again.";
+  const text = String(body.text || p.script?.lines?.[0]?.text || p.storyboard?.scenes?.[0]?.key_line
+    || "Na this one finally solve am, no wahala again.").slice(0, 300); // one line, not a free TTS service
   const EP = endpoints(c.env);
   const route = voiceRoute(p.language, persona);
   try {
-    const out = await speakLocal(c.env, EP, { text, language: p.language, persona });
+    assertBudget("modal", "tts_scene");
+    let out;
+    try { out = await speakLocal(c.env, EP, { text, language: p.language, persona }); }
+    catch (e) { if (e.ambiguous) await charge(c.env, "modal", "tts_scene", p.id); throw e; }
     await charge(c.env, "modal", "tts_scene", p.id);
-    return c.json({ ...out, persona: persona.id, plan: route.source });
-  } catch (e) { return c.json({ error: e.message }, 502); }
+    const name = out.audio_volume_path || volumeBasename(out.audio_url);
+    return c.json({ ...out, audio_media_url: mediaUrl(name), persona: persona.id, plan: route.source });
+  } catch (e) { return failure(c, "voice-preview", e); }
 });
 
 // Keyframes: one Muse Image still per storyboard scene (brief §6).
-// Cached — regenerating the same scene prompt costs $0. This endpoint lets
-// the user preview stills before filming; /generate also calls
-// ensureKeyframes itself, so previewing is optional, never required.
+// Cached — regenerating the same scene prompt costs $0. Lets the user
+// preview stills before filming; generate creates missing stills itself.
 app.post("/api/projects/:pid/keyframes", async (c) => {
+  if (!c.get("authorized")) return accessRequired(c);
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
   if (!p.storyboard) return c.json({ error: "Run storyboard first" }, 400);
   if (!has(c.env, "META_API_KEY")) return c.json({ error: "META_API_KEY not set" }, 400);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await readJson(c);
+  if (body === BAD_JSON) return badJson(c);
   const persona = getPersona(body.persona || p.persona || DEFAULT_PERSONA_ID);
   p.persona = persona.id;
-  const wanted = body.scene ? p.storyboard.scenes.filter((s) => s.n === body.scene) : p.storyboard.scenes;
-  const status = await ensureKeyframes(c.env, p, persona, wanted);
-  if (status.error) return c.json({ error: status.error }, 502);
-  return c.json({ project_id: p.id, keyframes: p.keyframes });
+  const wanted = body.scene ? p.storyboard.scenes.filter((s) => s.n === Number(body.scene)) : p.storyboard.scenes;
+  const failed = [];
+  for (const s of wanted) {
+    if (frameFor(p, s.n)) continue;
+    try { await keyframeForScene(c.env, p, persona, s); }
+    catch (e) { failed.push(s.n); if (isBudget(e)) { await saveProject(c.env, p); return failure(c, "keyframes", e); } console.error("[keyframes]", s.n, e?.message || e); }
+  }
+  await saveProject(c.env, p);
+  if (failed.length && failed.length === wanted.length) return c.json({ error: `Muse Image keyframes failed for scene(s) ${failed.join(", ")}` }, 502);
+  return c.json({ project_id: p.id, keyframes: publicProject(p).keyframes, failed_scenes: failed });
 });
 
 // Seed a keyframe: attach an EXISTING still (e.g. a user-approved, LOCKED
 // persona keyframe) to a scene without re-paying Muse Image — regenerating
-// would also risk a different face. The still joins the normal QC/generate
-// flow (content-hash SAM cache included). Body: { scene, keyframe_url }.
+// would also risk a different face. Body: { scene, keyframe_url: data:image/... }.
 app.post("/api/projects/:pid/keyframes/seed", async (c) => {
+  if (!c.get("authorized")) return accessRequired(c);
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await readJson(c, 8 * 1024 * 1024);
+  if (body === BAD_JSON) return badJson(c);
   const scene = Number(body.scene);
   const url = String(body.keyframe_url || "");
-  if (!scene || !url.startsWith("data:image")) return c.json({ error: "Body must be { scene: number, keyframe_url: data:image/... }" }, 400);
-  p.keyframes = [...(p.keyframes || []).filter((f) => f.scene !== scene), { scene, keyframe_url: url, source: "seeded" }];
+  if (!Number.isInteger(scene) || scene < 1 || !/^data:image\/[a-z+.-]+;base64,/i.test(url)) return c.json({ error: "Body must be { scene: number, keyframe_url: data:image/... }" }, 400);
+  try { await storeKeyframe(c.env, p, scene, url, "seeded"); } catch (e) { return failure(c, "seed", e); }
+  p.segmentation = (p.segmentation || []).filter((r) => r.scene !== scene); // new still -> fresh QC
   await saveProject(c.env, p);
-  return c.json({ project_id: p.id, seeded: scene, keyframes: p.keyframes.map((f) => ({ scene: f.scene, source: f.source || "muse-image" })) });
+  return c.json({ project_id: p.id, seeded: scene, keyframes: publicProject(p).keyframes.map((f) => ({ scene: f.scene, source: f.source, keyframe_url: f.keyframe_url?.startsWith("/api/") ? f.keyframe_url : undefined })) });
 });
 
 // SAM 3.1 QC on the project's keyframes (advisory — never blocks filming).
-// Body: { scene?: number } to limit to one scene.
+// Body: { scene?: number, force?: bool }.
 app.post("/api/projects/:pid/qc", async (c) => {
+  if (!c.get("authorized")) return accessRequired(c);
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
   if (!(p.keyframes || []).length) return c.json({ error: "Generate keyframes first" }, 400);
-  const body = await c.req.json().catch(() => ({}));
-  const scenes = body.scene && p.storyboard ? p.storyboard.scenes.filter((s) => s.n === body.scene) : null;
-  const res2 = await segmentKeyframes(c.env, p, { scenes, force: !!body.force });
-  return c.json({ project_id: p.id, segmentation: p.segmentation, qc: res2 });
-});
-
-app.get("/api/jobs/:jid", (c) => {
-  const job = mem.jobs.get(c.req.param("jid"));
-  return job ? c.json(job) : c.json({ error: "Job not found" }, 404);
+  const body = await readJson(c);
+  if (body === BAD_JSON) return badJson(c);
+  const out = { checked: 0, results: [], error: null };
+  const frames = (p.keyframes || []).filter((f) => !body.scene || f.scene === Number(body.scene));
+  if (!has(c.env, "META_API_KEY")) out.error = "META_API_KEY not set — SAM QC skipped.";
+  else for (const f of frames) {
+    const r = await segmentFrame(c.env, p, f, { force: !!body.force });
+    if (r.result) { out.results.push(r.result); out.checked++; }
+    if (r.error) out.error = r.error;
+  }
+  await saveProject(c.env, p);
+  return c.json({ project_id: p.id, segmentation: p.segmentation, qc: out });
 });
 
 export default app;

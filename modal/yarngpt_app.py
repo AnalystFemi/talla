@@ -13,15 +13,26 @@ Voices: English/Nigerian-English uses the model's 12 named preset voices
 per-language speaker names (yoruba_female2, ...). Pidgin is NOT served
 here — Pidgin stays on MMS (user decision); the app says so honestly.
 
-HTTP contract (Worker): POST {text, language, voice?} -> speak synchronously
-(TTS is seconds, no async spawn needed). Persona gender -> voice routing
+HTTP contract (Worker): POST {text, language, voice?} + header X-Talla-Token
+-> speak synchronously (TTS is seconds, no async spawn needed). Every
+response carries ``duration_s`` (real audio length) so the Worker can size
+the video clip to the voice: seconds = min(duration_s, engine cap). Persona gender -> voice routing
 lives in worker/src/personas.js; this app just honours `voice`.
 """
 import modal
 
+try:  # FastAPI is always present in-container; locally it only shapes the signature.
+    from fastapi import Header
+except ImportError:  # pragma: no cover
+    def Header(default=None, **_):  # noqa: N802
+        return default
+
 app = modal.App("talla-yarngpt")
 weights = modal.Volume.from_name("talla-yarn-weights", create_if_missing=True)
 outputs = modal.Volume.from_name("talla-outputs", create_if_missing=True)
+# Endpoint auth (contract §4): resolved at deploy — create the secret first.
+auth_secret = modal.Secret.from_name("talla-endpoint-auth", required_keys=["TALLA_ENDPOINT_TOKEN"])
+SAMPLE_RATE = 24000  # WavTokenizer large_speech_320_24k output rate
 
 WAV_YAML = "wavtokenizer_mediumdata_frame75_3s_nq1_code4096_dim512_kmeans200_attn.yaml"
 WAV_CKPT_URL = ("https://huggingface.co/novateur/WavTokenizer-large-speech-75token/"
@@ -52,12 +63,12 @@ image = (
         f"wget -q {WAV_CKPT_URL} -O /opt/assets/wavtokenizer_large_speech_320_24k.ckpt",
     )
     .env({"HF_HOME": "/model_weights", "USE_TF": "0", "TRANSFORMERS_NO_TF": "1"})
-    .add_local_python_source("r2")
+    .add_local_python_source("r2", "talla_common")
 )
 
 
 @app.cls(image=image, volumes={"/model_weights": weights, "/outputs": outputs},
-         gpu="T4", timeout=900, scaledown_window=60)
+         gpu="T4", timeout=900, scaledown_window=60, max_containers=1)
 class YarnGPT:
     @modal.enter()
     def load(self):
@@ -76,13 +87,14 @@ class YarnGPT:
     @modal.method()
     def speak(self, payload: dict) -> dict:
         """payload: {text, language, voice?, gender?}
-        -> {audio_url, audio_volume_path, engine, voice, language, mode}
+        -> {audio_url, audio_volume_path, duration_s, engine, voice, language, mode}
         Pidgin returns an error by design (MMS serves Pidgin)."""
-        import time, torchaudio, os
-        from r2 import upload_to_r2
+        import torchaudio
+        from talla_common import out_name, upload_or_volume
         lang = LANG_MAP.get((payload.get("language") or "english").lower())
         if not lang:
-            return {"error": "YarnGPT does not serve this language; use MMS (Pidgin)", "mode": "error"}
+            return {"error": "YarnGPT does not serve this language; use MMS (Pidgin)",
+                    "mode": "error", "duration_s": 0.0}
         gender = (payload.get("gender") or "female").lower()
         voice = payload.get("voice") or DEFAULT_VOICES[lang].get(gender, DEFAULT_VOICES[lang]["female"])
         ids = self.tok.tokenize_prompt(
@@ -92,19 +104,26 @@ class YarnGPT:
         audio = self.tok.get_audio(self.tok.get_codes(output)).float().cpu()
         if audio.dim() == 1:
             audio = audio.unsqueeze(0)
-        name = f"yarn_{int(time.time())}.wav"
+        duration_s = round(audio.shape[-1] / SAMPLE_RATE, 3)
+        name = out_name("yarn", "wav")
         path = f"/outputs/{name}"
-        torchaudio.save(path, audio, sample_rate=24000)
-        url = upload_to_r2(path, f"audio/{name}", "audio/wav")
-        outputs.commit()
-        return {"audio_url": url, "audio_volume_path": name, "engine": "yarngpt2",
+        torchaudio.save(path, audio, sample_rate=SAMPLE_RATE)
+        outputs.commit()  # GPU work is safe on the volume before the optional upload
+        url = upload_or_volume(path, f"audio/{name}", "audio/wav", name)
+        return {"audio_url": url, "audio_volume_path": name, "duration_s": duration_s,
+                "engine": "yarngpt2",
                 "voice": voice, "language": payload.get("language"), "mode": "live"}
 
 
-@app.function(image=image, timeout=600)
+@app.function(image=image, timeout=600, secrets=[auth_secret])
 @modal.fastapi_endpoint(method="POST")
-def speak_http(payload: dict) -> dict:
+def speak_http(payload: dict, x_talla_token: str | None = Header(default=None)) -> dict:
     """HTTP entry for the Cloudflare Worker: POST {text, language, voice?}"""
+    from talla_common import require_token
+    require_token(x_talla_token)  # 401 before the GPU class is touched
+    if not str((payload or {}).get("text") or "").strip():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="text is required")
     return YarnGPT().speak.remote(payload)
 
 
