@@ -126,11 +126,14 @@ app.post("/api/projects/:pid/script", (c) => stage(c, "script", scriptAgent, "sc
 const volumeBasename = (u) => (u ? String(u).split("/").pop() : null);
 
 function endpoints(env) {
+  // Bindings may be undefined in in-process/test contexts — degrade to demo
+  // mode instead of throwing a bare TypeError on property access.
+  const e = env || {};
   return {
-    tts: env.MODAL_TTS_ENDPOINT, yarn: env.MODAL_YARN_ENDPOINT,
-    h3: env.MODAL_H3_ENDPOINT, h3Result: env.MODAL_H3_RESULT_ENDPOINT,
-    wan: env.MODAL_WAN_ENDPOINT, wanResult: env.MODAL_WAN_RESULT_ENDPOINT,
-    stitch: env.MODAL_STITCH_ENDPOINT, stitchResult: env.MODAL_STITCH_RESULT_ENDPOINT,
+    tts: e.MODAL_TTS_ENDPOINT, yarn: e.MODAL_YARN_ENDPOINT,
+    h3: e.MODAL_H3_ENDPOINT, h3Result: e.MODAL_H3_RESULT_ENDPOINT,
+    wan: e.MODAL_WAN_ENDPOINT, wanResult: e.MODAL_WAN_RESULT_ENDPOINT,
+    stitch: e.MODAL_STITCH_ENDPOINT, stitchResult: e.MODAL_STITCH_RESULT_ENDPOINT,
   };
 }
 
@@ -481,6 +484,22 @@ app.post("/api/projects/:pid/keyframes", async (c) => {
   const status = await ensureKeyframes(c.env, p, persona, wanted);
   if (status.error) return c.json({ error: status.error }, 502);
   return c.json({ project_id: p.id, keyframes: p.keyframes });
+});
+
+// Seed a keyframe: attach an EXISTING still (e.g. a user-approved, LOCKED
+// persona keyframe) to a scene without re-paying Muse Image — regenerating
+// would also risk a different face. The still joins the normal QC/generate
+// flow (content-hash SAM cache included). Body: { scene, keyframe_url }.
+app.post("/api/projects/:pid/keyframes/seed", async (c) => {
+  const p = await getProject(c.env, c.req.param("pid"));
+  if (!p) return c.json({ error: "Project not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const scene = Number(body.scene);
+  const url = String(body.keyframe_url || "");
+  if (!scene || !url.startsWith("data:image")) return c.json({ error: "Body must be { scene: number, keyframe_url: data:image/... }" }, 400);
+  p.keyframes = [...(p.keyframes || []).filter((f) => f.scene !== scene), { scene, keyframe_url: url, source: "seeded" }];
+  await saveProject(c.env, p);
+  return c.json({ project_id: p.id, seeded: scene, keyframes: p.keyframes.map((f) => ({ scene: f.scene, source: f.source || "muse-image" })) });
 });
 
 // SAM 3.1 QC on the project's keyframes (advisory — never blocks filming).

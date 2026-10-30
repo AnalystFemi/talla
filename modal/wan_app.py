@@ -21,13 +21,26 @@ import modal
 app = modal.App("talla-wan")
 weights = modal.Volume.from_name("talla-wan-weights", create_if_missing=True)
 outputs = modal.Volume.from_name("talla-outputs", create_if_missing=True)
+# LTX-2.5-Diffusers is a gated (`gated: "auto"`) Hugging Face repo: the
+# container needs an HF token whose account has accepted the model terms,
+# supplied via a Modal secret named `huggingface-secret` (env var HF_TOKEN).
+# No secret is committed here — the secret object is resolved on Modal at
+# runtime, and containers simply run without a token when it is absent
+# (Wan still works; the LTX load then fails with a clear gated-repo error).
+hf_secret = modal.Secret.from_name("huggingface-secret", required_keys=[])
 FPS = 24
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("ffmpeg")
     .uv_pip_install("torch==2.7.0", "diffusers>=0.35.0", "transformers>=4.51.0",
-                    "accelerate>=1.6.0", "huggingface-hub", "pillow", "boto3", "fastapi[standard]")
+                    "accelerate>=1.6.0", "huggingface-hub", "pillow", "boto3", "fastapi[standard]",
+                    # ftfy/regex: CLIP text-encoder deps — missing ftfy crashed the
+                    # first Funmi calibration render (NameError inside diffusers).
+                    # opencv (headless): diffusers' export_to_video requires cv2 —
+                    # missing cv2 crashed the first otherwise-successful render
+                    # at export time (after the full denoise had completed).
+                    "ftfy", "regex", "opencv-python-headless")
     .env({"HF_HOME": "/weights"})
     .add_local_python_source("r2")
 )
@@ -78,7 +91,7 @@ def _save_clip(prefix: str, frames, outputs_volume) -> dict:
     return {"clip_url": url, "clip_volume_path": name, "mode": "live"}
 
 
-@app.cls(image=image, volumes={"/weights": weights, "/outputs": outputs},
+@app.cls(image=image, volumes={"/weights": weights, "/outputs": outputs}, secrets=[hf_secret],
          gpu="A100-80GB", timeout=1200, scaledown_window=60)
 class WanEngine:
     @modal.enter()
@@ -128,10 +141,46 @@ def generate_result(call_id: str) -> dict:
         return {"status": "error", "error": f"{type(e).__name__}: {str(e)[:400]}"}
 
 
+def _engine_health_payload() -> dict:
+    """Shared by the HTTP probe and the `health_check` CLI runner below
+    (`modal run modal/wan_app.py::health_check` — same probe from inside
+    Modal, for when local HTTPS to *.modal.run is unavailable)."""
+    import os
+    import requests
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    ltx_access = None
+    if token:
+        try:
+            r = requests.get("https://huggingface.co/api/models/Lightricks/LTX-2.5-Diffusers",
+                             headers={"Authorization": f"Bearer {token}"}, timeout=20)
+            ltx_access = r.status_code
+        except Exception as e:
+            ltx_access = f"error: {type(e).__name__}"
+    return {
+        "status": "ok",
+        "deploy_marker": "wan-ltx25-upgrade-2026-10-29",
+        "wan_checkpoint": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        "ltx_checkpoint": LTX_CHECKPOINT,
+        "hf_token_present": bool(token),
+        "ltx_repo_http_status": ltx_access,
+    }
+
+
+@app.function(image=image, timeout=120, secrets=[hf_secret])
+@modal.fastapi_endpoint(method="GET")
+def engine_health() -> dict:
+    """Free deployment probe (CPU container, no GPU, no model load): reports
+    what this deployment WOULD load, so the studio can verify the deployed
+    code matches the repo before any paid render. Also checks (read-only HF
+    API metadata call) whether the container's HF token can actually see the
+    gated LTX-2.5 repo — 200 means terms accepted, 401/403 means not."""
+    return _engine_health_payload()
+
+
 LTX_CHECKPOINT = "Lightricks/LTX-2.5-Diffusers"
 
 
-@app.function(image=image, volumes={"/weights": weights, "/outputs": outputs},
+@app.function(image=image, volumes={"/weights": weights, "/outputs": outputs}, secrets=[hf_secret],
               gpu="A100-80GB", timeout=1200, scaledown_window=60)
 def ltx_generate(payload: dict) -> dict:
     """LTX 2.5 fallback (silent motion for Talla).
@@ -166,3 +215,54 @@ def ltx_generate(payload: dict) -> dict:
     video = out[0] if isinstance(out, (tuple, list)) else out.frames
     return {**_save_clip("ltx", video, outputs), "engine": "ltx",
             "ltx_checkpoint": LTX_CHECKPOINT, "num_frames": frames}
+
+
+@app.function(image=image, timeout=120, secrets=[hf_secret])
+def deployed_health_check() -> dict:
+    """Remote-callable mirror of the engine_health probe, invoked against the
+    DEPLOYED app by name — `Function.lookup("talla-wan",
+    "deployed_health_check").remote()` — so the check verifies the actual
+    deployed code (and that `huggingface-secret` is attached to it), not an
+    ephemeral `modal run` copy."""
+    return _engine_health_payload()
+
+
+@app.function(image=image, timeout=300, secrets=[hf_secret])
+def deployed_compat_check() -> dict:
+    """CPU-only Diffusers compatibility probe (NO model download, NO GPU):
+    confirms the pinned Diffusers exposes both pipeline classes and that each
+    checkpoint repo's own model_index.json declares the exact class the code
+    instantiates. Catches version-skew failures before a paid GPU render."""
+    import os
+    import requests
+    import diffusers
+    from huggingface_hub import model_info
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    out = {"diffusers": getattr(diffusers, "__version__", "unknown"), "checks": {}}
+    for name, repo, cls in [
+        ("wan", "Wan-AI/Wan2.2-I2V-A14B-Diffusers", "WanImageToVideoPipeline"),
+        ("ltx", LTX_CHECKPOINT, "LTX2ImageToVideoPipeline"),
+    ]:
+        papi = hasattr(diffusers, cls)
+        try:
+            cfg = requests.get(f"https://huggingface.co/{repo}/resolve/main/model_index.json",
+                               headers={"Authorization": f"Bearer {token}"} if token else {},
+                               timeout=30).json()
+            declared = cfg.get("_class_name")
+        except Exception as e:
+            declared = f"error: {type(e).__name__}"
+        try:
+            gated = model_info(repo, token=token).gated
+        except Exception as e:
+            gated = f"error: {type(e).__name__}"
+        out["checks"][name] = {"pipeline_class_available": papi, "repo_class_name": declared, "gated": gated}
+    return out
+
+
+@app.local_entrypoint()
+def health_check():
+    """CLI mirror of the engine_health probe: `modal run modal/wan_app.py`.
+    NOTE: `modal run` uses an ephemeral app — it proves the repo code works
+    inside Modal, but only `deployed_health_check` (remote-called by name)
+    proves what the DEPLOYED app runs."""
+    print(_engine_health_payload())

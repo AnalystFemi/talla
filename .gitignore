@@ -10,3 +10,7 @@ __pycache__/
 data/*.webp
 data/*.wav
 data/*.mp4
+
+# third-party reference frames / heavy media (review 2026-10-30)
+data/ref_frame_*.png
+data/ref_seedance_*

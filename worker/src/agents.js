@@ -16,6 +16,13 @@ export const SCRIPT_FORMATS = ["standard", "confession"];
 
 const CONFESSION_BEATS = `Confession-format beats (in order): 1 Hook-confession ("I stopped using X..."), 2 Pain-agitation (what the old option cost them), 3 Switch (the new workflow/product in one sentence), 4 Proof-stack (live demo, before/after, zoom on the detail — one proof per scene), 5 Copy-me CTA (permission + exact next step). Every line must sound like a friend gisting, not a TV presenter. One idea per scene, short spoken sentences.`;
 
+// Engine duration caps (modal/wan_app.py — do not exceed, or stitch must
+// clone-freeze the picture tail under the voice): Wan 2.2 renders at most
+// 161 frames @24fps (~6.7s); LTX 2.5 at most 257 frames (~10.7s). Storyboard
+// scenes therefore stay 5-7s and script lines stay short enough to speak
+// inside the scene: roughly 12-15 spoken words for a 6s Wan line.
+const ENGINE_CAPS = `ENGINE CAPS (hard): each scene's spoken line must fit its seconds when spoken naturally (~2.2 words/second). Wan 2.2 motion caps at ~6.7s per scene and LTX 2.5 at ~10.7s, so keep scenes 5-7s and lines to about 12-15 words — never write a line that needs more seconds than its scene, or the picture freezes under the voice.`;
+
 const OVERLAY_SCHEMA = `Each scene may carry an optional "overlay" for the proof cutaway: null (face-only A-roll) or {asset:"receipt-screenshot"|"screen-recording"|"before-after"|null, note:"what the editor should composite, max 12 words", seconds:2-6, style:"pip"|"fullscreen"}. Face-only hook/CTA scenes use null; Proof scenes SHOULD set an overlay.`;
 
 function demoStoryboard(format, hooks) {
@@ -87,8 +94,8 @@ export async function storyboardAgent(env, project) {
   }
   assertBudget("baseten");
   const formatBrief = format === "confession"
-    ? `FORMAT: confession (winning-UGC recreation). 4-7 scenes, total 25-45s, each 5-15s. ${CONFESSION_BEATS} ${OVERLAY_SCHEMA}`
-    : `FORMAT: standard. 3-7 scenes, total 25-40s, each 5-15s. Talking-head primary. ${OVERLAY_SCHEMA}`;
+    ? `FORMAT: confession (winning-UGC recreation). 4-7 scenes, total 25-45s, each 5-7s. ${CONFESSION_BEATS} ${OVERLAY_SCHEMA} ${ENGINE_CAPS}`
+    : `FORMAT: standard. 3-7 scenes, total 25-40s, each 5-7s. Talking-head primary. ${OVERLAY_SCHEMA} ${ENGINE_CAPS}`;
   const out = await basetenChat(env, [
     { role: "system", content: `You are Talla's Storyboard agent. Return ONLY JSON {scenes:[{n,purpose,shot,key_line,seconds,visual,overlay}]}. ${formatBrief}` },
     { role: "user", content: `Product: ${project.name} (${project.description})\nResearch: ${JSON.stringify(project.research)}` },
@@ -109,7 +116,7 @@ export async function scriptAgent(env, project) {
   assertBudget("baseten");
   const formatBrief = format === "confession" ? CONFESSION_BEATS : "Standard UGC: hook, pain, proof, testimonial, CTA. One idea per scene.";
   const out = await basetenChat(env, [
-    { role: "system", content: `You are Talla's Scriptwriter. Write in ${lang} exactly as a Nigerian creator would speak it. Return ONLY JSON {language, lines:[{scene,text,seconds}]}. Short spoken lines, one idea per scene. ${formatBrief}` },
+    { role: "system", content: `You are Talla's Scriptwriter. Write in ${lang} exactly as a Nigerian creator would speak it. Return ONLY JSON {language, lines:[{scene,text,seconds}]}. Short spoken lines, one idea per scene. ${formatBrief} ${ENGINE_CAPS}` },
     { role: "user", content: `Storyboard: ${JSON.stringify(project.storyboard)}\nResearch: ${JSON.stringify(project.research)}` },
   ]);
   await charge(env, "baseten", "script", project.id);
