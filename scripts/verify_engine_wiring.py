@@ -383,6 +383,14 @@ check("result check failed" in widx, "video_poll lost the WP-H degrade-on-poll-f
 check("modalCancel" in widx, "worker lost the WP-H abandon-cancel (GPU keeps billing on timeout)")
 check("modalCancel(env, job.engine" in widx, "video_poll lost the WP-H scene-timeout cancel")
 check("modalCancel(env, EP.stitch" in widx, "stitch_poll lost the WP-H stitch-timeout cancel")
+print("[5c] stitch_app + talk_app cancel endpoints (WP-H: abandoned calls stop billing)")
+for app_name, cancel_fn in [("stitch_app", "stitch_cancel"), ("talk_app", "cancel_http"), ("wan_app", "cancel_http")]:
+    csrc = apps[app_name][0]
+    check(f"def {cancel_fn}(" in csrc, f"{app_name} lost {cancel_fn} (WP-H cancel target)")
+    check("cancel_call" in csrc, f"{app_name} {cancel_fn} must wrap talla_common cancel_call")
+    check("require_token(x_talla_token)" in csrc, f"{app_name} {cancel_fn} must be token-gated")
+check("async function modalCancel(" in (ROOT / "worker" / "src" / "providers.js").read_text(encoding="utf-8"),
+      "providers.js lost modalCancel (WP-H)")
 
 
 # ------------------------------------------------------------ ffmpeg tests

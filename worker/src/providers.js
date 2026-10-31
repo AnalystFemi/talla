@@ -235,21 +235,29 @@ export async function modalPollOnce(env, resultEndpoint, callId) {
 
 /** Fire-and-forget cancel for an abandoned Modal call (WP-H: a timed-out
  *  scene or stitch must not keep billing on the GPU). Best-effort — a cancel
- *  failure is logged, never thrown into the step machine. The Modal apps
- *  expose token-gated cancel_http endpoints that wrap talla_common
- *  cancel_call; the cancel URL is the matching generate/stitch endpoint with
- *  "generate" or "stitch" swapped for "cancel" (e.g. .../generate -> cancel).
- *  Falls back to posting {call_id} to the spawn endpoint's sibling path. */
+ *  failure is logged, never thrown into the step machine. Each Modal app
+ *  exposes a token-gated POST cancel endpoint wrapping talla_common
+ *  cancel_call: wan/talk use ".../cancel" next to generate (cancel_http),
+ *  stitch uses ".../stitch_cancel" next to stitch (stitch_http has no
+ *  cancel_http sibling, so its cancel lives under its own name). The cancel
+ *  URL is derived from the spawn endpoint: replace a trailing "generate" or
+ *  "stitch" path segment with the app's cancel endpoint name. */
 export async function modalCancel(env, spawnEndpoint, callId) {
   if (!spawnEndpoint || !callId) return;
-  const url = String(spawnEndpoint).replace(/generate|stitch/, "cancel");
-  try {
-    await fetch(url === String(spawnEndpoint) ? `${String(spawnEndpoint).replace(/\/$/, "")}/cancel` : url, {
-      method: "POST", headers: modalHeaders(env, { "Content-Type": "application/json" }),
-      body: JSON.stringify({ call_id: callId }),
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch (e) { console.error("[modal] cancel failed:", e?.message || e); }
+  const base = String(spawnEndpoint).replace(/\/$/, "");
+  const candidates = base.endsWith("/stitch")
+    ? [`${base}_cancel`, `${base}/cancel`]
+    : [`${base.replace(/\/generate$/, "")}/cancel`, `${base}/cancel`];
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url, {
+        method: "POST", headers: modalHeaders(env, { "Content-Type": "application/json" }),
+        body: JSON.stringify({ call_id: callId }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (res.ok || res.status === 401) return; // delivered, or token-gated (logged Modal-side)
+    } catch (e) { console.error("[modal] cancel failed:", e?.message || e); return; }
+  }
 }
 
 /** Fetch one finished file from the talla-outputs volume via the token-gated

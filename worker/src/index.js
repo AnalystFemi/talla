@@ -225,6 +225,10 @@ async function storeKeyframe(env, p, sceneN, dataUrl, source) {
 }
 
 // Resolve any stored frame to a data URL (SAM input, Wan keyframe_b64).
+// WP-H CPU note: base64 of a ~1-2 MB keyframe is a few ms of string work —
+// far under the 10 ms free-plan budget per step. R2 reads are I/O (not CPU),
+// and keyframes resolve once per scene (cached in the project afterwards),
+// so nothing here needs moving to Modal or a paid Workers plan.
 async function frameDataUrl(env, f) {
   if (!f) return null;
   if (f.keyframe_key) {

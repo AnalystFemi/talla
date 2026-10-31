@@ -337,6 +337,15 @@ def stitch_result(call_id: str = "", x_talla_token: str | None = Header(default=
     return poll_call(call_id)
 
 
+@app.function(image=image, timeout=60, secrets=[auth_secret])
+@modal.fastapi_endpoint(method="POST")
+def stitch_cancel(payload: dict, x_talla_token: str | None = Header(default=None)) -> dict:
+    """POST {call_id} -> cancel an abandoned stitch so it stops billing (WP-H)."""
+    from talla_common import cancel_call, require_token
+    require_token(x_talla_token)  # 401 before touching Modal
+    return cancel_call((payload or {}).get("call_id"))
+
+
 @app.function(image=image, volumes={"/outputs": outputs}, timeout=300, secrets=[auth_secret])
 @modal.fastapi_endpoint(method="GET")
 def file_http(name: str = "", x_talla_token: str | None = Header(default=None)):
