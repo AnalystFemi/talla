@@ -27,11 +27,11 @@ export const PIPELINE = [
   ["Export", "Caption + 5–8 hashtags, ready to paste · Muse Spark Open"],
 ];
 
-// Fallbacks only — the live names come from /api/health `models`.
-export const MODEL_BADGES = { research: "Muse Spark Open (Baseten)", storyboard: "Muse Spark Open (Baseten)",
-  script: "Muse Spark Open (Baseten)", keyframe: "Muse Image 1.0 (Meta)", segment: "SAM 3.1 (Meta, keyframe QC)",
-  voice: "YarnGPT2 / MMS (Modal)", video: "InfiniteTalk (Modal, lip-synced primary)", critic: "Muse Spark Open (Baseten)",
-  stitch: "ffmpeg composite (Modal)", verify: "Verify — honest deferred (Meta 404)", export: "Muse Spark Open (Baseten)" };
+// Studio no longer shows model names — badges kept only for legacy fallbacks
+export const MODEL_BADGES = { research: "Research", storyboard: "Storyboard",
+  script: "Script", keyframe: "Keyframe", segment: "QC",
+  voice: "Voice", video: "InfiniteTalk", critic: "Critic",
+  stitch: "Stitch", verify: "Verify", export: "Export" };
 
 export const STAGE_LABELS = { research: "Research", storyboard: "Storyboard", script: "Brain", keyframe: "Keyframe", segment: "QC",
   voice: "Voice", video: "Video", critic: "Critic (advisory)", stitch: "Stitch", verify: "Verify", export: "Export" };
@@ -51,11 +51,11 @@ export const FORMATS = [
 ];
 
 export const PERSONAS = [
-  { id: "female-creator", label: "Female creator (Aisha)", blurb: "Woman, late 20s, braids — voice: Idera (YarnGPT2)" },
-  { id: "female-creator-2", label: "Female creator 2 (Funmi) — locked", blurb: "Light-skinned Nigerian woman, black knotless braids, upscale Lagos flat — Yoruba calibration, voice: yoruba_female2" },
-  { id: "male-creator", label: "Male creator", blurb: "Man, early 30s, fade + beard — voice: Jude (YarnGPT2)" },
-  { id: "male-creator-dark", label: "Male creator — dark skin (Ebuka)", blurb: "Dark-skinned man, early 30s, fade + neat beard — voice: Jude (YarnGPT2) · avatar pending approval" },
-  { id: "male-creator-light", label: "Male creator — light skin (Tunde)", blurb: "Light-skinned man, late 20s, short waves — voice: Jude (YarnGPT2) · avatar pending approval" },
+  { id: "female-creator", label: "Female creator (Aisha)", blurb: "Woman, late 20s, braids — voice: Idera (YarnGPT2)", img: "/agents/voice-cut.webp", voiceImg: "/agents/voice-cut.webp" },
+  { id: "female-creator-2", label: "Female creator 2 (Funmi) — locked", blurb: "Light-skinned Nigerian woman, black knotless braids, upscale Lagos flat — Yoruba calibration, voice: yoruba_female2", img: "/agents/researcher-cut.webp", voiceImg: "/agents/researcher-cut.webp" },
+  { id: "male-creator", label: "Male creator", blurb: "Man, early 30s, fade + beard — voice: Jude (YarnGPT2)", img: "/agents/editor-cut.webp", voiceImg: "/agents/editor-cut.webp" },
+  { id: "male-creator-dark", label: "Male creator — dark skin (Ebuka)", blurb: "Dark-skinned man, early 30s, fade + neat beard — voice: Jude (YarnGPT2)", img: "/agents/critic-cut.webp", voiceImg: "/agents/critic-cut.webp" },
+  { id: "male-creator-light", label: "Male creator — light skin (Tunde)", blurb: "Light-skinned man, late 20s, short waves — voice: Jude (YarnGPT2)", img: "/agents/scriptwriter-cut.webp", voiceImg: "/agents/scriptwriter-cut.webp" },
 ];
 
 export const EMPTY_FORM = { name: "", description: "", url: "", category: "", audience: "", language: "pidgin", persona: "female-creator", format: "confession", sceneLimit: "0" };

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ACCESS_REQUIRED_MSG, OFFLINE_MSG, api, getAccessCode, getLastProject, getStoredJob, isPlayable, mediaUrl,
   setAccessCode, setLastProject, setStoredJob } from "./api.js";
 import Home, { Logo } from "./Home.jsx";
-import { AGENTS, EMPTY_FORM, ENGINES, FORMATS, LANGS, LANG_LABELS, MODEL_BADGES, PERSONAS, SAMPLE_PRODUCT,
+import { AGENTS, EMPTY_FORM, ENGINES, FORMATS, LANGS, LANG_LABELS, PERSONAS, SAMPLE_PRODUCT,
   STAGE_LABELS } from "./content.js";
 
 const POLL_MS = 5000;
@@ -76,7 +76,6 @@ function Studio({ go }) {
   const [stage, setStage] = useState(0);
   const [dir, setDir] = useState("fwd");
   const [openScene, setOpenScene] = useState(-1);
-  const [showModels, setShowModels] = useState(false);
   const [actOpen, setActOpen] = useState(false);
   const stageHead = useRef(null);
 
@@ -286,8 +285,8 @@ function Studio({ go }) {
     : busy === "storyboard" ? "Storyboard artist is building the shot plan…"
     : busy === "save" ? "Saving your storyboard edits…"
     : busy === "script" ? "Scriptwriter is writing in " + (LANG_LABELS[form.language] || form.language) + "…"
-    : busy === "keyframes" ? "Muse Image is photographing your creator…"
-    : busy === "qc" ? "SAM 3.1 is checking the faces and phones…"
+    : busy === "keyframes" ? "Photographing your creator…"
+    : busy === "qc" ? "Checking the faces and phones…"
     : busy === "voice" ? "Voice artist is reading your creator's test line…"
     : busy === "generate" ? "Starting your film run…"
     : busy === "export" ? "Preparing your caption and hashtags…"
@@ -339,7 +338,7 @@ function Studio({ go }) {
     {shownFrames.length > 0 && <div className="bubble"><img src="/agents/editor-cut.webp" alt="" width="44" height="44" loading="lazy" /><div className="msg"><b>Editor</b>
       {shownFrames.length} Muse Image keyframe{shownFrames.length > 1 ? "s" : ""} ready. Hit Generate video — any missing still is created automatically inside the run.</div></div>}
     {job && <div className="bubble"><img src="/agents/critic-cut.webp" alt="" width="44" height="44" loading="lazy" /><div className="msg"><b>Critic · advisory</b>
-      Left advisory notes on {job.scenes?.length || 0} scene{job.scenes?.length === 1 ? "" : "s"}&apos; plan and script ({health?.models?.critic || MODEL_BADGES.critic}). SAM QC: {segStatus?.checked ? `${segStatus.checked} frame(s) checked` : "not reported"}. Speech check (first voiced scene): {job.verification?.status || "pending"}.</div></div>}
+      Left advisory notes on {job.scenes?.length || 0} scene{job.scenes?.length === 1 ? "" : "s"}&apos; plan and script. Face check: {segStatus?.checked ? `${segStatus.checked} frame(s) checked` : "not reported"}. Speech check: {job.verification?.status || "pending"}.</div></div>}
     {busy && <div className="bubble typing-bubble"><img src={agentImg(STEPS[Math.max(1, busyStage)]?.agent || "researcher")} alt="" width="44" height="44" /><div className="msg"><span className="dots" aria-hidden="true"><span></span><span></span><span></span></span> {activeRunText}</div></div>}
     {!project?.research && !busy && <p className="hint">Your team is waiting. Run research and their updates will appear here.</p>}
   </>);
@@ -401,6 +400,13 @@ function Studio({ go }) {
           <span className="mode-dot" aria-hidden="true" />
           {live ? <><b>Live mode</b> — paid models run on your requests. Every paid call is checked against the credit budget.</>
             : <><b>Demo mode</b> — no credits spent. Enter an access code to run live.</>}</div>}
+        {health && health.providers && health.providers.meta === false && (
+          <div className="hint card" role="note" style={{ marginTop: 10, background: "#fff7ed", border: "1px solid #fed7aa" }}>
+            <b>Note:</b> Meta API is paused — image keyframes & face checks use demo data for now. Research, script, voice & filming still run on Baseten + Modal.
+          </div>)}
+        {showAccess && <div className="hint card" style={{ marginTop: 10 }}>
+            <b>Access code:</b> use <code><access-code-redacted></code> (demo team code) — paste it above to unlock live. Ask owner for your own code later.
+          </div>}
         <div aria-live="polite">{busy && <div className="working-bar"><span className="spinner" aria-hidden="true" />{activeRunText}<span className="dots" aria-hidden="true"><span></span><span></span><span></span></span></div>}</div>
         {error && <div className="err" role="alert"><b>Something needs attention.</b> {error}</div>}
 
@@ -475,7 +481,7 @@ function Studio({ go }) {
           {/* ===== 1. Research ===== */}
           {viewStage === 1 && project && <>
             <StageHead headRef={stageHead} working={busyStage === 1} n={1} title="Research brief" sub="What your buyers feel, want and respond to — the raw material for every scene."
-              agent="researcher" model={health?.models?.research || MODEL_BADGES.research}
+              agent="researcher"
               extra={project.research?.mode === "demo" && <span className="pill demo">demo</span>} />
             {!project.research && busy === "research" && <Skeleton cards={4} />}
             {!project.research && busy !== "research" && <div className="empty-stage card">
@@ -512,7 +518,7 @@ function Studio({ go }) {
           {viewStage === 2 && project?.research && <>
             <StageHead headRef={stageHead} working={busyStage === 2} n={2} title="Storyboard — review before we film"
               sub="Your plan of the video. Edit any scene inline, then save. Nothing expensive runs until you film. Proof scenes carry a real-asset overlay (screen recording / before-after) composited at stitch — never AI-drawn."
-              agent="scriptwriter" model={health?.models?.storyboard || MODEL_BADGES.storyboard}
+              agent="scriptwriter"
               extra={project.storyboard?.format === "confession" && <span className="pill">confession format</span>} />
             {!project.storyboard && busy === "storyboard" && <Skeleton cards={6} tall />}
             {!project.storyboard && busy !== "storyboard" && <div className="empty-stage card">
@@ -572,9 +578,8 @@ function Studio({ go }) {
           {/* ===== 3. Script ===== */}
           {viewStage === 3 && project?.storyboard && <>
             <StageHead headRef={stageHead} working={busyStage === 3} n={3} title={`Script in ${langLabel}`} sub="One idea per scene, written for the creator to say out loud — then voiced with open Nigerian TTS."
-              agent="scriptwriter" model={health?.models?.script || MODEL_BADGES.script}
-              extra={<><span className={"agent-chip" + (busy === "voice" ? " working" : "")}><img src="/agents/voice-cut.webp" alt="" width="40" height="40" loading="lazy" /> Voice</span>
-                <span className="pill">{health?.models?.voice || MODEL_BADGES.voice}</span></>} />
+              agent="scriptwriter"
+              extra={<span className={"agent-chip" + (busy === "voice" ? " working" : "")}><img src="/agents/voice-cut.webp" alt="" width="40" height="40" loading="lazy" /> Voice</span>} />
             {!project.script && busy === "script" && <div className="script-sheet card" aria-hidden="true">{[0, 1, 2, 3].map((i) => (
               <div className="skel-scene" key={i}><div className="skel line w40" /><div className="skel line w60 center" /><div className="skel line w75 center" /></div>))}</div>}
             {!project.script && busy !== "script" && <div className="empty-stage card">
@@ -634,11 +639,15 @@ function Studio({ go }) {
                 <p className="hint">Use calibration first: prove one talking-head beat looks right before spending on the full video.</p>
               </section>
               <section className="card"><h2 className="card-title">Your creator&apos;s voice</h2>
+                <div className="hint" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  <img src={selectedPersona.img || selectedPersona.voiceImg || "/agents/voice-cut.webp"} alt="" width="40" height="40" style={{ borderRadius: "50%", objectFit: "cover", border: "2px solid #e5e7eb" }} />
+                  <span>{selectedPersona.label} — {LANG_LABELS[form.language] || form.language} voice</span>
+                </div>
                 <p className="hint">{engine === "talk"
-                  ? "InfiniteTalk animates your creator's face to your Nigerian voice (YarnGPT2 / MMS) — lips follow the audio, clip length follows the line. That is true lip-sync, not a voiceover."
-                  : "Wan/LTX generate silent motion — your local Nigerian voice (YarnGPT2 / MMS) is generated first and muxed onto the picture at stitch, so the words are exactly your script, spoken by your chosen creator. That is the winning-UGC voiceover format: continuous talk + proof cutaways."}</p>
+                  ? "Your creator’s face moves with the voice — lips follow the audio, clip length follows the line."
+                  : "Your creator’s voice is generated first, then added to the picture — the words are exactly your script."}</p>
                 <button className="btn ghost" disabled={!!busy} onClick={previewVoice}>{busy === "voice" ? "Voicing…" : `▶ Preview my creator's voice${lockNote}`}</button>
-                {voicePreview && <div className="scene"><b>Voice preview</b> <span className="pill">{voicePreview.engine} · {voicePreview.voice || "fixed speaker"}</span>
+                {voicePreview && <div className="scene"><div style={{ display: "flex", alignItems: "center", gap: 8 }}><img src={selectedPersona.img || "/agents/voice-cut.webp"} alt="" width="32" height="32" style={{ borderRadius: "50%" }} /><b>Voice preview</b></div> <span className="pill">{voicePreview.voice || "fixed speaker"}</span>
                   {voicePreview.plan && <p className="hint">Plan: {voicePreview.plan}</p>}
                   {voicePreview.warning && <p className="hint">⚠ {voicePreview.warning}</p>}
                   {isPlayable(voicePreview.audio_url) && <audio controls src={mediaUrl(voicePreview.audio_url)} />}
@@ -647,31 +656,19 @@ function Studio({ go }) {
               </section>
             </div>
 
-            <section className="card"><button type="button" className="expand-btn big" aria-expanded={showModels} aria-controls="film-models" onClick={() => setShowModels((v) => !v)}>
-              Models in this run <span className="chev" aria-hidden="true">▾</span></button>
-              <div className={"expand" + (showModels ? " open" : "")} id="film-models"><div className="expand-inner">
-                <div className="credits-bar">
-                  <span className="credit-chip">Keyframe · {health?.models?.keyframe || MODEL_BADGES.keyframe}</span>
-                  <span className="credit-chip">QC · {health?.models?.segment || MODEL_BADGES.segment}</span>
-                  <span className="credit-chip">Voice · {health?.models?.voice || MODEL_BADGES.voice}</span>
-                  <span className="credit-chip">Video · {ENGINES.find((e) => e.id === engine)?.short}</span>
-                  <span className="credit-chip">Critic (advisory) · {health?.models?.critic || MODEL_BADGES.critic}</span>
-                  <span className="credit-chip">Stitch · {health?.models?.stitch || MODEL_BADGES.stitch}</span>
-                  <span className="credit-chip">Verify (first voiced scene) · {health?.models?.verify || MODEL_BADGES.verify}</span>
-                </div></div></div>
-            </section>
+            {/* Studio no longer surfaces model names — kept intentionally clean for users */}
 
             {busy === "keyframes" && <Skeleton cards={3} tall />}
             {shownFrames.length > 0 && <div className="keyframe-grid">{shownFrames.map((f, i) => { const seg = segByScene.get(f.scene); return (
               <div className="keyframe-card card" key={f.scene} style={{ "--i": i }}>
-                <div className="scene-head"><b>Scene {f.scene}</b><span className="pill">{f.source === "seeded" ? "seeded still" : "Muse Image 1.0"}</span></div>
+                <div className="scene-head"><b>Scene {f.scene}</b><span className="pill">{f.source === "seeded" ? "seeded still" : "photo still"}</span></div>
                 {f.keyframe_url ? <img src={mediaUrl(f.keyframe_url)} alt={`Scene ${f.scene} keyframe`} loading="lazy" /> : <p className="hint">Keyframe stored on the server.</p>}
-                {seg ? <p className={"qc-line " + (seg.person_ok ? "ok" : "warn")}>{seg.person_ok ? "✓ SAM QC: creator detected" : "⚠ SAM QC: no creator detected"}{seg.detections ? ` · person ${seg.detections.person ?? "—"} · phone ${seg.detections.phone ?? "—"}` : ""}</p> : <p className="hint">SAM QC has not checked this frame yet.</p>}
+                {seg ? <p className={"qc-line " + (seg.person_ok ? "ok" : "warn")}>{seg.person_ok ? "✓ Face check: creator detected" : "⚠ Face check: no creator detected"}{seg.detections ? ` · person ${seg.detections.person ?? "—"} · phone ${seg.detections.phone ?? "—"}` : ""}</p> : <p className="hint">Face check has not run on this frame yet.</p>}
                 {seg?.note && <p className="hint">{seg.note}</p>}
               </div>); })}
             </div>}
             {qcRun?.qc?.error && <p className="hint">⚠ {qcRun.qc.error}</p>}
-            {qcRun?.qc && !qcRun.qc.error && <p className="hint">SAM QC checked {qcRun.qc.checked} frame(s). It is advisory — a warning helps you fix a bad still before filming, it never blocks the run.</p>}
+            {qcRun?.qc && !qcRun.qc.error && <p className="hint">Face check looked at {qcRun.qc.checked} frame(s). It is advisory — a warning helps you fix a bad still before filming, it never blocks the run.</p>}
             {sbDirty && <p className="hint unsaved">Unsaved storyboard edits are not used for filming — save them and rewrite the script first.</p>}
 
             {job && <section className="card job-box">
@@ -735,7 +732,7 @@ function Studio({ go }) {
           {/* ===== 5. Post ===== */}
           {viewStage === 5 && project?.script && <>
             <StageHead headRef={stageHead} working={busyStage === 5} n={5} title="Export for posting" sub={`After your video is stitched with the AI-generated label, we prepare a ready-to-post package: a caption in your video's language (${LANG_LABELS[project.language] || project.language}) plus 5–8 hashtags. No auto-posting — copy it and post it yourself.`}
-              model={health?.models?.export || MODEL_BADGES.export} extra={<span className="pill demo">optional</span>} />
+              extra={<span className="pill demo">optional</span>} />
             {busy === "export" && !pp && <Skeleton cards={1} />}
             {!pp && busy !== "export" && <div className="empty-stage card">
               <img src={agentImg("editor")} alt="" width="96" height="96" className="empty-head" />
