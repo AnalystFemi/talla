@@ -1,11 +1,21 @@
 // Copy + constants for the homepage and Studio. Keep claims honest:
 // the critic is an advisory plan & script critic, verify checks the first voiced scene.
 export const AGENTS = [
-  { key: "researcher", name: "Researcher", img: "/agents/researcher.webp", color: "Blue", job: "Analyses trends, competitors and what Nigerian buyers actually want" },
-  { key: "scriptwriter", name: "Scriptwriter", img: "/agents/scriptwriter.webp", color: "Orange", job: "Writes hooks and scripts in Pidgin, Yoruba, Hausa, Igbo & Nigerian English" },
-  { key: "voice", name: "Voice", img: "/agents/voice.webp", color: "Pink", job: "Speaks your script with open Nigerian TTS — YarnGPT2 / MMS on Modal" },
-  { key: "critic", name: "Critic", img: "/agents/critic.webp", color: "Green", job: "Plan & script critic (advisory) — Muse Spark scores each scene's plan and line and leaves notes; it never blocks a run" },
-  { key: "editor", name: "Editor", img: "/agents/editor.webp", color: "Purple", job: "Stitches clips, burns captions, adds the AI-generated label, final polish" },
+  { key: "researcher", name: "Researcher", img: "/agents/researcher-cut.webp", lg: "/agents/researcher-lg.webp", color: "Blue",
+    job: "Analyses trends, competitors and what Nigerian buyers actually want",
+    short: "studies your market and what Nigerian buyers actually want", status: "Found 3 pain points for rcpt" },
+  { key: "scriptwriter", name: "Scriptwriter", img: "/agents/scriptwriter-cut.webp", lg: "/agents/scriptwriter-lg.webp", color: "Orange",
+    job: "Writes hooks and scripts in Pidgin, Yoruba, Hausa, Igbo & Nigerian English",
+    short: "writes hooks and scripts in your customers' language", status: "Wrote a 6-scene Pidgin script" },
+  { key: "voice", name: "Voice", img: "/agents/voice-cut.webp", lg: "/agents/voice-lg.webp", color: "Pink",
+    job: "Speaks your script with open Nigerian TTS — YarnGPT2 / MMS on Modal",
+    short: "speaks every line with open Nigerian TTS", status: "Voiced scene 1 in Pidgin" },
+  { key: "critic", name: "Critic", img: "/agents/critic-cut.webp", lg: "/agents/critic-lg.webp", color: "Green",
+    job: "Plan & script critic (advisory) — Muse Spark scores each scene's plan and line and leaves notes; it never blocks a run",
+    short: "leaves advisory notes on each scene's plan and line", status: "Left 1 advisory note" },
+  { key: "editor", name: "Editor", img: "/agents/editor-cut.webp", lg: "/agents/editor-lg.webp", color: "Purple",
+    job: "Stitches clips, burns captions, adds the AI-generated label, final polish",
+    short: "stitches clips, burns captions and adds the AI label", status: "Stitching captions…" },
 ];
 
 export const PIPELINE = [
@@ -27,8 +37,9 @@ export const STAGE_LABELS = { research: "Research", storyboard: "Storyboard", sc
   voice: "Voice", video: "Video", critic: "Critic (advisory)", stitch: "Stitch", verify: "Verify", export: "Export" };
 
 export const ENGINES = [
-  { id: "wan", label: "Wan 2.2 — 720p vertical, ~5s per scene (primary)", short: "Wan 2.2 (Modal)" },
-  { id: "ltx", label: "LTX 2.5 — fallback, up to ~10s", short: "LTX 2.5 (Modal)" },
+  { id: "wan", label: "Wan 2.2 — 720p vertical, ~5s per scene (primary)", short: "Wan 2.2 (Modal)", blurb: "Silent motion 720p, ~5s per scene (primary)" },
+  { id: "ltx", label: "LTX 2.5 — fallback, up to ~10s", short: "LTX 2.5 (Modal)", blurb: "Fallback, up to ~10s per scene" },
+  { id: "talk", label: "InfiniteTalk — lip-synced to your voice (keyed off until smoke test)", short: "InfiniteTalk (keyed off)", blurb: "Audio-driven lips, clip follows the line — smoke test pending" },
 ];
 
 export const LANGS = ["pidgin", "yoruba", "hausa", "igbo", "nigerian-english"];
@@ -49,13 +60,13 @@ export const PERSONAS = [
 
 export const EMPTY_FORM = { name: "", description: "", url: "", category: "", audience: "", language: "pidgin", persona: "female-creator", format: "confession", sceneLimit: "0" };
 
-// "Try a sample product" — a realistic (fictional) Lagos brand for judges.
+// "Try a sample product" — rcpt is Talla's demo product (owner decision).
 export const SAMPLE_PRODUCT = {
-  name: "Ori Glow — whipped shea butter body cream",
-  description: "Unrefined Grade-A shea butter from Kwara, whipped in small batches in Yaba, Lagos with coconut oil and cocoa butter. Made for dry, ashy skin in harmattan — soaks in fast, no greasy shine, no bleaching agents, safe for kids and sensitive skin. 250g jar for ₦6,500, ordered on WhatsApp with same-day delivery across Lagos.",
+  name: "rcpt",
+  description: "rcpt turns a sale into a clean, branded receipt in seconds from your phone — built for Nigerian small businesses who sell on WhatsApp and Instagram and want customers to trust them. Free to start, Pro plan for logos and unlimited receipts.",
   url: "",
-  category: "skincare",
-  audience: "Lagos women 22–40 who buy skincare from Instagram and WhatsApp vendors and are tired of fake or bleaching creams",
+  category: "business tools",
+  audience: "WhatsApp & Instagram vendors in Lagos",
   language: "pidgin",
   persona: "female-creator",
   format: "confession",
