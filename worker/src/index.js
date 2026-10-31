@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { researchAgent, storyboardAgent, scriptAgent, criticAgent, exportAgent, LANGUAGES, SCRIPT_FORMATS, CRITIC_LABEL } from "./agents.js";
 import { creditSummary, charge, cacheGet, cacheSet, cacheKey, contentHash, assertBudget, assertBudgetUsd, estimateCost, refreshTotals } from "./credits.js";
-import { has, modalCall, modalPollOnce, modalFile, museImage, museTranscribe, samSegment, bytesToBase64, base64ToBytes, VOICE_TIMEOUT_MS } from "./providers.js";
+import { has, modalCall, modalPollOnce, modalCancel, modalFile, museImage, museTranscribe, samSegment, bytesToBase64, base64ToBytes, VOICE_TIMEOUT_MS } from "./providers.js";
 import { PERSONAS, DEFAULT_PERSONA_ID, getPersona, voiceRoute } from "./personas.js";
 
 const app = new Hono();
@@ -792,6 +792,9 @@ async function runStep(env, job, p) {
       } else if (r.status === "error") {
         w.failed = `${job.engine} scene ${s.n}: ${String(r.error || "Modal job failed").slice(0, 160)}`; st.phase = "critic";
       } else if (Date.now() - w.spawned_at > 25 * 60 * 1000) {
+        // WP-H: the GPU call is abandoned — cancel it so it stops billing,
+        // then record the timeout and move on. The cancel is fire-and-forget.
+        await modalCancel(env, job.engine === "talk" ? EP.talk : EP.wan, w.call_id);
         w.failed = `${job.engine} scene ${s.n}: timed out after 25 min (call ${w.call_id})`; st.phase = "critic";
       }
       return true;
@@ -840,7 +843,11 @@ async function runStep(env, job, p) {
       setStep(job, "Stitching the film (voice + captions + AI label)", 90);
       const r = await modalPollOnce(env, EP.stitchResult, st.stitch.call_id);      if (r.status === "complete") { if (r.error) job.stitch_error = String(r.error).slice(0, 200); else acceptFinal(job, r); st.phase = "verify"; }
       else if (r.status === "error") { job.stitch_error = String(r.error || "stitch failed").slice(0, 200); st.phase = "verify"; }
-      else if (Date.now() - st.stitch.spawned_at > 12 * 60 * 1000) { job.stitch_error = "stitch timed out after 12 min"; st.phase = "verify"; } // stitch app itself times out at 600 s
+      else if (Date.now() - st.stitch.spawned_at > 12 * 60 * 1000) {
+        // WP-H: cancel the abandoned stitch so the CPU/GPU stops billing.
+        await modalCancel(env, EP.stitch, st.stitch.call_id);
+        job.stitch_error = "stitch timed out after 12 min"; st.phase = "verify";
+      } // stitch app itself times out at 600 s
       return true;
     }
     case "verify": {

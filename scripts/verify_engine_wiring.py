@@ -378,8 +378,11 @@ check("video\\/mp4|video\\/webm|image\\/png" in widx, "overlay route lost the as
 # WP-E verify scope: first voiced scene only, labelled in code and copy
 check("job.verification.scope" in widx, "verify lost the scope label (WP-E)")
 check("first voiced scene" in widx, "verify lost the honest scope comment (WP-E)")
-# WP-H robustness: poll failures degrade, acceptClip tolerates either lane
+# WP-H robustness: poll failures degrade, timeouts cancel the GPU call
 check("result check failed" in widx, "video_poll lost the WP-H degrade-on-poll-failure guard")
+check("modalCancel" in widx, "worker lost the WP-H abandon-cancel (GPU keeps billing on timeout)")
+check("modalCancel(env, job.engine" in widx, "video_poll lost the WP-H scene-timeout cancel")
+check("modalCancel(env, EP.stitch" in widx, "stitch_poll lost the WP-H stitch-timeout cancel")
 
 
 # ------------------------------------------------------------ ffmpeg tests

@@ -233,6 +233,25 @@ export async function modalPollOnce(env, resultEndpoint, callId) {
   return { status: "running", poll_error: lastErr };
 }
 
+/** Fire-and-forget cancel for an abandoned Modal call (WP-H: a timed-out
+ *  scene or stitch must not keep billing on the GPU). Best-effort — a cancel
+ *  failure is logged, never thrown into the step machine. The Modal apps
+ *  expose token-gated cancel_http endpoints that wrap talla_common
+ *  cancel_call; the cancel URL is the matching generate/stitch endpoint with
+ *  "generate" or "stitch" swapped for "cancel" (e.g. .../generate -> cancel).
+ *  Falls back to posting {call_id} to the spawn endpoint's sibling path. */
+export async function modalCancel(env, spawnEndpoint, callId) {
+  if (!spawnEndpoint || !callId) return;
+  const url = String(spawnEndpoint).replace(/generate|stitch/, "cancel");
+  try {
+    await fetch(url === String(spawnEndpoint) ? `${String(spawnEndpoint).replace(/\/$/, "")}/cancel` : url, {
+      method: "POST", headers: modalHeaders(env, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ call_id: callId }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) { console.error("[modal] cancel failed:", e?.message || e); }
+}
+
 /** Fetch one finished file from the talla-outputs volume via the token-gated
  * stitch_app file_http endpoint. Returns the raw Response (streamable). The
  * timeout guards only the wait for HEADERS — a long video body may stream
