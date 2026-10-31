@@ -400,9 +400,9 @@ function Studio({ go }) {
           <span className="mode-dot" aria-hidden="true" />
           {live ? <><b>Live mode</b> — paid models run on your requests. Every paid call is checked against the credit budget.</>
             : <><b>Demo mode</b> — no credits spent. Enter an access code to run live.</>}</div>}
-        {health && health.providers && health.providers.meta === false && (
+        {health && (
           <div className="hint card" role="note" style={{ marginTop: 10, background: "#fff7ed", border: "1px solid #fed7aa" }}>
-            <b>Note:</b> Meta API is paused — image keyframes & face checks use demo data for now. Research, script, voice & filming still run on Baseten + Modal.
+            <b>Note:</b> Meta API is paused — using Baseten for research, script & review for now. Image keyframes & face checks use demo data until Meta is back.
           </div>)}
         {showAccess && <div className="hint card" style={{ marginTop: 10 }}>
             <b>Access code:</b> use <code><access-code-redacted></code> (demo team code) — paste it above to unlock live. Ask owner for your own code later.
