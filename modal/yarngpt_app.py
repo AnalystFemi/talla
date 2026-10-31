@@ -99,8 +99,12 @@ class YarnGPT:
         voice = payload.get("voice") or DEFAULT_VOICES[lang].get(gender, DEFAULT_VOICES[lang]["female"])
         ids = self.tok.tokenize_prompt(
             self.tok.create_prompt(payload["text"], lang=lang, speaker_name=voice))
+        # max_new_tokens, NOT max_length: the speaker prompt (reference audio
+        # codes) already fills most of a 4000-token max_length, which silently
+        # truncated every line to ~1-2 s (tone-marked Yoruba worst: longer
+        # prompt, less room). ~75 codes/s -> 3000 new tokens is ~40 s of speech.
         output = self.model.generate(input_ids=ids, temperature=0.1,
-                                     repetition_penalty=1.1, max_length=4000)
+                                     repetition_penalty=1.1, max_new_tokens=3000)
         audio = self.tok.get_audio(self.tok.get_codes(output)).float().cpu()
         if audio.dim() == 1:
             audio = audio.unsqueeze(0)

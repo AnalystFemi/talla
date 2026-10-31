@@ -199,11 +199,17 @@ class WanEngine:
     def load(self):
         import torch
         from diffusers import WanImageToVideoPipeline
-        self.pipe = WanImageToVideoPipeline.from_pretrained(WAN_CHECKPOINT, torch_dtype=torch.bfloat16)
-        self.pipe.enable_model_cpu_offload()
+        self.load_error = None  # same fail-fast contract as LTXEngine.load
+        try:
+            self.pipe = WanImageToVideoPipeline.from_pretrained(WAN_CHECKPOINT, torch_dtype=torch.bfloat16)
+            self.pipe.enable_model_cpu_offload()
+        except Exception as e:
+            self.load_error = f"Wan load failed: {type(e).__name__}: {str(e)[:300]}"
 
     @modal.method()
     def generate(self, payload: dict) -> dict:
+        if self.load_error:
+            raise RuntimeError(self.load_error)
         frames = wan_frames(payload)
         steps = _wan_steps(payload)
         img = _fit_cover(_load_frame(payload), WAN_W, WAN_H)
@@ -238,12 +244,21 @@ class LTXEngine:
     def load(self):
         import torch
         from diffusers import LTX2ImageToVideoPipeline
-        self.pipe = LTX2ImageToVideoPipeline.from_pretrained(
-            LTX_CHECKPOINT, torch_dtype=torch.bfloat16, cache_dir="/weights")
-        self.pipe.to("cuda")
+        # A failed load (e.g. 403 on the gated repo) must FAIL the call, not
+        # crash-loop the container: Modal retries a crashing @enter until the
+        # timeout, so the job polled as "running" for 45 min (2026-10-30).
+        self.load_error = None
+        try:
+            self.pipe = LTX2ImageToVideoPipeline.from_pretrained(
+                LTX_CHECKPOINT, torch_dtype=torch.bfloat16, cache_dir="/weights")
+            self.pipe.to("cuda")
+        except Exception as e:
+            self.load_error = f"LTX load failed: {type(e).__name__}: {str(e)[:300]}"
 
     @modal.method()
     def generate(self, payload: dict) -> dict:
+        if self.load_error:
+            raise RuntimeError(self.load_error)
         frames = ltx_frames(payload)
         img = _fit_cover(_load_frame(payload), LTX_W, LTX_H)
         out = self.pipe(

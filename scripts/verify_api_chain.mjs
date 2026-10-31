@@ -102,8 +102,21 @@ must((await post(`/api/projects/${pid}/qc`, { scene: 1 })).status === 401, "qc w
 const qc = await post(`/api/projects/${pid}/qc`, { scene: 1 }, AUTH);
 must(qc.status === 200, `qc -> ${qc.status}`);
 
+// WP-G proof upload: unauthorised attempt must 401; authorised upload of a
+// REAL asset (tiny png) attaches to scene 4 and stamps overlay.real. Without
+// R2 bound the worker keeps the asset inline (data URL); with R2 it serves
+// through /api/media/r2 — either way it is a real asset, never a placeholder.
+must((await post(`/api/projects/${pid}/overlays`, { scene: 4, asset: tinyPng })).status === 401, "overlay upload without code must 401");
+const proof = await post(`/api/projects/${pid}/overlays`, { scene: 4, asset: tinyPng }, AUTH);
+must(proof.status === 201 && proof.data.overlay?.real === true && String(proof.data.overlay?.asset || "").length > 40, `overlay upload -> ${proof.status} ${JSON.stringify(proof.data).slice(0, 160)}`);
+must((await post(`/api/projects/${pid}/overlays`, { scene: 99, asset: tinyPng }, AUTH)).status === 404, "overlay upload to missing scene must 404");
+
 // --- async generate ----------------------------------------------------------
-must((await post(`/api/projects/${pid}/generate`, { engine: "wan" })).status === 401, "generate without code must 401");
+// A public (no-code) generate is a labelled $0 demo job; poll it to completion
+// so it doesn't hold the one-running-job slot for the authorised run below.
+const anon = await post(`/api/projects/${pid}/generate`, { engine: "wan" });
+must(anon.status === 202 && anon.data.mode === "demo", `anonymous generate must be a 202 demo job -> ${anon.status}`);
+for (let k = 0; k < 20; k++) { const r = await get(`/api/jobs/${anon.data.id}`); if (r.data.status !== "running") break; }
 const gen = await post(`/api/projects/${pid}/generate`, { engine: "h3", limit: 2 }, AUTH);
 must(gen.status === 202, `generate -> ${gen.status} ${JSON.stringify(gen.data).slice(0, 200)}`);
 must(gen.data.engine === "wan", `engine=${gen.data.engine} (h3 must normalise to wan/parked)`);

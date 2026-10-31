@@ -34,7 +34,7 @@ MODAL_DIR = ROOT / "modal"
 sys.path.insert(0, str(MODAL_DIR))  # talla_common, r2 import like in-container
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
-APPS = ["wan_app", "stitch_app", "yarngpt_app", "tts_app", "h3_app", "lipsync_app"]
+APPS = ["wan_app", "stitch_app", "yarngpt_app", "tts_app", "h3_app", "lipsync_app", "talk_app"]
 PROTOBUF_PIN = "protobuf==4.25.8"
 
 
@@ -274,7 +274,24 @@ check("fonts-noto-core" in apps["stitch_app"][1]["image"].apt, "stitch: fonts-no
 for dep in ["ftfy", "regex", "opencv-python-headless"]:
     check(dep in wan["image"].pip, f"wan: {dep} missing from image")
 
-print("[4] Wan / LTX engine wiring")
+print("[4] Wan / LTX / InfiniteTalk engine wiring")
+print("[4a] talk_app: no wan_io import, local _load_frame, keyframe+voice contract")
+tsrc = apps["talk_app"][0]
+check("from wan_io import" not in tsrc and "import wan_io" not in tsrc, "talk_app still imports wan_io (must use local _load_frame)")
+check("def _load_frame" in tsrc, "talk_app lost its local _load_frame")
+check("keyframe_b64" in tsrc and "keyframe_url" in tsrc, "talk_app must accept keyframe_b64 or keyframe_url")
+check("audio_volume_path" in tsrc, "talk_app must take audio_volume_path (voice-first order)")
+check('"has_audio": True' in tsrc or "'has_audio': True" in tsrc, "talk_app must report has_audio=True (clip carries the voice)")
+check('"engine": "infinitetalk"' in tsrc or "'engine': 'infinitetalk'" in tsrc, "talk_app must report engine infinitetalk")
+check("FPS = 25" in tsrc and "MAX_FRAMES = 1000" in tsrc, "talk_app must be 25 fps capped at 1000 frames (40 s)")
+check("50aa0a94184315407a991ae804d9b58d6d311ba8" in tsrc, "talk_app InfiniteTalk pin changed unexpectedly")
+check("TalkEngine" in tsrc, "talk_app lost the TalkEngine class")
+talk = next(o for o in apps["talk_app"][1]["app"].registered if o.__name__ == "TalkEngine")
+check(talk._modal_kwargs.get("gpu") == "H100", "TalkEngine gpu should be H100")
+check(talk._modal_kwargs.get("timeout") == 1800, "TalkEngine timeout should be 1800")
+check(talk._modal_kwargs.get("max_containers") == 1, "TalkEngine max_containers should be 1")
+
+print("[4b] Wan / LTX engine wiring")
 wsrc = apps["wan_app"][0]
 check("Wan-AI/Wan2.2-I2V-A14B-Diffusers" in wsrc, "Wan A14B checkpoint missing")
 check("Wan2.2-I2V-14B-Diffusers" not in wsrc, "dead Wan checkpoint id still present")
@@ -326,6 +343,43 @@ srt = st["build_srt"]([{"text": "One"}, {"text": "  "}, {"text": "Three"}], [2.0
 check(srt.startswith("1\n00:00:00,000 --> 00:00:02,000\nOne") and "2\n00:00:03,500 --> 00:00:06,000\nThree" in srt,
       f"build_srt timing/numbering wrong: {srt!r}")
 check("Fontname=Noto Sans" in st["CAPTION_STYLE"], "captions must force Noto Sans")
+
+print("[5b] worker: talk plumbing, voice guard, overlays, verify scope")
+widx = (ROOT / "worker" / "src" / "index.js").read_text(encoding="utf-8")
+wper = (ROOT / "worker" / "src" / "personas.js").read_text(encoding="utf-8")
+wcred = (ROOT / "worker" / "src" / "credits.js").read_text(encoding="utf-8")
+# talk endpoint plumbing: no job can request talk without both spawn+result
+for needle, msg in [
+    ("talk: e.MODAL_TALK_ENDPOINT", "endpoints() missing MODAL_TALK_ENDPOINT"),
+    ("talkResult: e.MODAL_TALK_RESULT_ENDPOINT", "endpoints() missing MODAL_TALK_RESULT_ENDPOINT"),
+    ('modal_talk: has(c.env, "MODAL_TALK_ENDPOINT")', "health missing modal_talk provider flags"),
+    ('engines: ["wan", "ltx", "talk"]', "health engines list missing talk"),
+    ('"modal:talk_clip"', "credits missing modal:talk_clip estimate"),
+    ("talk_clip", "worker missing talk_clip op (estimateJobUsd / runStep)"),
+    ("job.engine === \"talk\" ? EP.talk : EP.wan", "video_spawn not routing talk to EP.talk"),
+    ("job.engine === \"talk\" ? EP.talkResult : EP.wanResult", "video_poll not routing talk to EP.talkResult"),
+    ("talkAudio", "acceptClip lost the talk muxed-audio guard (stitch would double the voice)"),
+    ("talk engine needs its voice WAV first", "video_spawn lost the talk no-voice-before-spend guard"),
+    ('ENGINE_CAP_S = { wan: 5.0, ltx: 10.6, talk: 40.0 }', "ENGINE_CAP_S missing talk 40.0"),
+    ('talk: "InfiniteTalk"', "ENGINE_LABEL missing talk"),
+]:
+    check(needle in widx or needle in wcred, msg)
+# WP-F yoruba guard: diacritics retry + explicit english fallback, no silent undefined voice
+check("def stripDiacritics" in widx or "function stripDiacritics" in widx, "worker lost stripDiacritics (WP-F retry)")
+check("Yoruba diacritics broke the first take" in widx, "speakLocal lost the WP-F diacritics retry warning")
+check('fallback: "english"' in wper, "voiceRoute lost the explicit english fallback (WP-F)")
+check("falling back to the English voice" in wper, "voiceRoute lost the fallback warning copy (WP-F)")
+check("persona.yarn_voice[yarnLang]" in wper, "voiceRoute must still read the persona yarn map")
+# WP-G overlay upload route: gated, size-capped, real assets only
+check('app.post("/api/projects/:pid/overlays"' in widx, "overlay upload route missing (WP-G)")
+check("max 8 MB" in widx, "overlay route lost the 8 MB cap copy (WP-G)")
+check("real: true" in widx, "overlay route lost the real-asset stamp (WP-G)")
+check("video\\/mp4|video\\/webm|image\\/png" in widx, "overlay route lost the asset MIME whitelist (WP-G)")
+# WP-E verify scope: first voiced scene only, labelled in code and copy
+check("job.verification.scope" in widx, "verify lost the scope label (WP-E)")
+check("first voiced scene" in widx, "verify lost the honest scope comment (WP-E)")
+# WP-H robustness: poll failures degrade, acceptClip tolerates either lane
+check("result check failed" in widx, "video_poll lost the WP-H degrade-on-poll-failure guard")
 
 
 # ------------------------------------------------------------ ffmpeg tests
