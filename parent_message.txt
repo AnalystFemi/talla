@@ -1,0 +1,30 @@
+﻿STEP 1 COMPLETE — talla-talk deployed to Modal with PYTHONUTF8=1
+
+✅ Deployment: SUCCESS in 9.388s
+App: talla-talk (ap-GyaWwiNrRJw1mtA5tvcIHx) — deployed 2026-10-31 09:55 WAT
+View: https://modal.com/apps/akinspajo/main/deployed/talla-talk
+
+ENDPOINTS CAPTURED:
+- generate_http: https://akinspajo--talla-talk-generate-http.us-east.modal.run
+- generate_result: https://akinspajo--talla-talk-generate-result.us-east.modal.run
+- cancel_http: https://akinspajo--talla-talk-cancel-http.us-east.modal.run
+
+VERIFICATION:
+- Modal reports: Created Functions download, TalkEngine.*, generate_http, generate_result, cancel_http all ✓
+- Endpoint HEAD check returns 405 Method Not Allowed (expected without POST + X-Talla-Token) — confirms live
+- modal app list shows talla-talk deployed with 1 task
+
+.ENV CHECK:
+- MODAL_TALK_ENDPOINT: MISSING in .env (no entries found)
+- .env contains 11 other MODAL_* endpoints but not TALK
+- Suggested values for when wiring:
+  MODAL_TALK_ENDPOINT=https://akinspajo--talla-talk-generate-http.us-east.modal.run
+  MODAL_TALK_RESULT_ENDPOINT=https://akinspajo--talla-talk-generate-result.us-east.modal.run
+
+.ENV.EXAMPLE:
+- Contains placeholders MODAL_TALK_ENDPOINT= and MODAL_TALK_RESULT_ENDPOINT= (empty) — correct, no update needed per instructions
+
+NOTES:
+- Weight download NOT run (modal run modal/talk_app.py::download skipped as instructed)
+- Working dir: C:\Users\DELL\Downloads\Talla\talla
+- Full output saved to deploy_output.txt and deploy_report.md

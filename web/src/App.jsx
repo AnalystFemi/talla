@@ -634,7 +634,9 @@ function Studio({ go }) {
                 <p className="hint">Use calibration first: prove one talking-head beat looks right before spending on the full video.</p>
               </section>
               <section className="card"><h2 className="card-title">Your creator&apos;s voice</h2>
-                <p className="hint">Wan/LTX generate silent motion — your local Nigerian voice (YarnGPT2 / MMS) is generated first and muxed onto the picture at stitch, so the words are exactly your script, spoken by your chosen creator. That is the winning-UGC voiceover format: continuous talk + proof cutaways.</p>
+                <p className="hint">{engine === "talk"
+                  ? "InfiniteTalk animates your creator's face to your Nigerian voice (YarnGPT2 / MMS) — lips follow the audio, clip length follows the line. That is true lip-sync, not a voiceover."
+                  : "Wan/LTX generate silent motion — your local Nigerian voice (YarnGPT2 / MMS) is generated first and muxed onto the picture at stitch, so the words are exactly your script, spoken by your chosen creator. That is the winning-UGC voiceover format: continuous talk + proof cutaways."}</p>
                 <button className="btn ghost" disabled={!!busy} onClick={previewVoice}>{busy === "voice" ? "Voicing…" : `▶ Preview my creator's voice${lockNote}`}</button>
                 {voicePreview && <div className="scene"><b>Voice preview</b> <span className="pill">{voicePreview.engine} · {voicePreview.voice || "fixed speaker"}</span>
                   {voicePreview.plan && <p className="hint">Plan: {voicePreview.plan}</p>}

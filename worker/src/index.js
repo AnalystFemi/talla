@@ -618,7 +618,7 @@ app.post("/api/projects/:pid/generate", async (c) => {
   if (!p.script) return c.json({ error: "Run script first" }, 400);
   const body = await readJson(c);
   if (body === BAD_JSON) return badJson(c);
-  const requestedEngine = String(body.engine || "wan").toLowerCase();
+  const requestedEngine = String(body.engine || "talk").toLowerCase();
   // talk (InfiniteTalk) is selectable only when its Modal endpoints are
   // wired; otherwise it falls back to wan so a job can never request an
   // engine with no spawn endpoint. H3 is parked server-side, never submitted.

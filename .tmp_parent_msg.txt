@@ -1,0 +1,16 @@
+﻿SUBAGENT RESULT — Whisper vs YarnGPT clarification (talla/talla)
+
+VERIFIED FILES:
+- worker/src/providers.js L84-106: museTranscribe() is VERIFY-stage only, currently HTTP 404 on /audio/transcriptions (muse-voice-transcribe-1.0). Separate from voice generation.
+- worker/src/personas.js + modal/yarngpt_app.py L42-50, L106-107: YarnGPT2 is the SPEAKER for Yoruba/Hausa/Igbo/English (and Nigerian-English). Voices: idera/jude etc. max_new_tokens=3000 already deployed (fixes Yoruba diacritics truncation 1.1s -> 5.03s). Pidgin stays on MMS (talla-tts).
+
+CLARIFICATION FOR OWNER DOCS (copy-ready):
+
+> **Voice vs Verify — no change to the speaker.**
+> Talla's speaker is YarnGPT2 (Nigerian voices via talla-yarngpt on Modal) for Yoruba, Hausa, Igbo and English; Pidgin uses MMS. YarnGPT2 is untouched.
+> **Whisper was proposed only as an ear, not a mouth:** the Verify step that transcribes the first voiced scene to check wording is broken (Meta Muse Voice Transcribe returns HTTP 404 — see worker/src/providers.js:91-101). The proposal is to replace that *transcription check* with a small Whisper-large-v3 on Modal (WP-E option b) because Whisper has Yoruba/Hausa support, runs cheap on T4, and is token-gated. It does NOT replace YarnGPT2, does NOT change wording, and does NOT affect pronunciation/accuracy of generated speech — generation and verification are independent pipelines. The Yoruba diacritics truncation bug is already fixed in Modal: max_new_tokens=3000 in modal/yarngpt_app.py:107 (~40s speech, ~75 codes/s).
+
+WP-E DECISION STILL NEEDED (owner):
+Choose one: (a) find correct Meta endpoint/model name, (b) deploy Whisper on Modal for Verify, or (c) honestly mark Verify as 'not available' in UI/content.js/job output (MUSE_WONDER_BRIEF L236-239). No code change to TTS required. WP-F remaining: optional Yoruba diacritics normalisation guard (retry if duration_s << 0.35s/word) — already mitigated by 3000 tokens.
+
+RECOMMENDATION: Document Whisper as 'Verify ear (transcription check only)' vs 'YarnGPT2 speaker (generation)' to prevent future confusion.

@@ -66,6 +66,15 @@ image = (
     .pip_install("protobuf==4.25.8")  # same volume crash-loop pin as the other Talla apps
     .run_commands(f"git clone https://github.com/MeiGen-AI/InfiniteTalk.git /opt/it && "
                   f"cd /opt/it && git checkout {IT_COMMIT}")
+    .run_commands(
+        "grep -R 'no_init_weights\\|ContextManagers' /opt/it --include='*.py' | head -20; echo '---patching diffusers shim---'; "
+        "PY=$(python -c \"import inspect, pathlib, diffusers.models.modeling_utils; print(pathlib.Path(inspect.getfile(diffusers.models.modeling_utils)).resolve())\"); "
+        "grep -q 'def no_init_weights' \"$PY\" || printf \"\\nimport contextlib\\ntry:\\n    no_init_weights\\nexcept NameError:\\n    @contextlib.contextmanager\\n    def no_init_weights():\\n        yield\\n\" >> \"$PY\"; "
+        "grep -q 'class ContextManagers' \"$PY\" || printf \"\\nclass ContextManagers:\\n    def __init__(self, managers):\\n        self.managers = managers\\n    def __enter__(self):\\n        for m in self.managers:\\n            m.__enter__()\\n        return self\\n    def __exit__(self, *a):\\n        for m in reversed(self.managers):\\n            m.__exit__(*a)\\n        return False\\n\" >> \"$PY\"; "
+        "echo \"patched $PY\"; grep -E 'def no_init_weights|class ContextManagers' \"$PY\" | tail -5; "
+        "echo '---verify imports---'; python -c \"from diffusers.models.modeling_utils import no_init_weights, ContextManagers; print('imports ok:', no_init_weights, ContextManagers)\" && echo 'diffusers patch verified' || echo 'import still fails'; "
+        "grep -R 'no_init_weights\\|ContextManagers' /opt/it --include='*.py' | head -20"
+    )
     .env({"HF_HOME": f"{W}/hf"})
     .add_local_python_source("r2", "talla_common")
 )
@@ -127,6 +136,29 @@ class TalkEngine:
         try:
             os.chdir("/opt/it")
             sys.path.insert(0, "/opt/it")
+            # shim for diffusers>=0.32 where no_init_weights/ContextManagers were removed
+            import diffusers.models.modeling_utils as mmu
+            if not hasattr(mmu, 'no_init_weights'):
+                import contextlib
+
+                @contextlib.contextmanager
+                def _no_init_weights():
+                    yield
+
+                mmu.no_init_weights = _no_init_weights
+            if not hasattr(mmu, 'ContextManagers'):
+                class _ContextManagers:
+                    def __init__(self, managers):
+                        self.managers = managers
+                    def __enter__(self):
+                        for m in self.managers:
+                            m.__enter__()
+                        return self
+                    def __exit__(self, *a):
+                        for m in reversed(self.managers):
+                            m.__exit__(*a)
+                        return False
+                mmu.ContextManagers = _ContextManagers
             import wan
             from wan.configs import WAN_CONFIGS
             from transformers import Wav2Vec2FeatureExtractor

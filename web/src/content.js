@@ -22,7 +22,7 @@ export const PIPELINE = [
   ["Research", "Pain points, hooks, formats · Muse Spark Open"], ["Storyboard", "You review the scenes before money moves · Muse Spark Open"],
   ["Script", "Local-language lines, one idea per scene · Muse Spark Open"], ["Keyframe", "Persona-locked photoreal stills · Muse Image 1.0"],
   ["Keyframe QC", "Advisory person + phone check on each still · SAM 3.1"], ["Voice", "Open Nigerian speech · YarnGPT2 / MMS"],
-  ["Video", "Silent motion, voice muxed at stitch · Wan 2.2 (primary) / LTX 2.5 (fallback)"], ["Critic", "Plan & script critic (advisory) · Muse Spark Open"],
+  ["Video", "Lip-synced to voice · InfiniteTalk (primary, any length) / Wan 2.2 (fallback, silent ~5s)"], ["Critic", "Plan & script critic (advisory) · Muse Spark Open"],
   ["Verify", "First voiced scene transcribed and checked vs script · Muse Voice Transcribe"], ["Film", "Captioned 9:16 film + AI-generated label · ffmpeg"],
   ["Export", "Caption + 5–8 hashtags, ready to paste · Muse Spark Open"],
 ];
@@ -30,16 +30,16 @@ export const PIPELINE = [
 // Fallbacks only — the live names come from /api/health `models`.
 export const MODEL_BADGES = { research: "Muse Spark Open (Baseten)", storyboard: "Muse Spark Open (Baseten)",
   script: "Muse Spark Open (Baseten)", keyframe: "Muse Image 1.0 (Meta)", segment: "SAM 3.1 (Meta, keyframe QC)",
-  voice: "YarnGPT2 / MMS (Modal)", video: "Wan 2.2 (Modal, primary)", critic: "Muse Spark Open (Baseten)",
+  voice: "YarnGPT2 / MMS (Modal)", video: "InfiniteTalk (Modal, lip-synced)", critic: "Muse Spark Open (Baseten)",
   stitch: "ffmpeg composite (Modal)", verify: "Muse Voice Transcribe 1.0 (Meta)", export: "Muse Spark Open (Baseten)" };
 
 export const STAGE_LABELS = { research: "Research", storyboard: "Storyboard", script: "Brain", keyframe: "Keyframe", segment: "QC",
   voice: "Voice", video: "Video", critic: "Critic (advisory)", stitch: "Stitch", verify: "Verify", export: "Export" };
 
 export const ENGINES = [
-  { id: "wan", label: "Wan 2.2 — 720p vertical, ~5s per scene (primary)", short: "Wan 2.2 (Modal)", blurb: "Silent motion 720p, ~5s per scene (primary)" },
+  { id: "talk", label: "InfiniteTalk — lip-synced to your voice, any length (recommended)", short: "InfiniteTalk (recommended)", blurb: "Audio-driven lips, clip follows the line — any length" },
+  { id: "wan", label: "Wan 2.2 — 720p vertical, ~5s per scene (fallback)", short: "Wan 2.2 (fallback)", blurb: "Silent motion 720p, ~5s per scene (fallback)" },
   { id: "ltx", label: "LTX 2.5 — fallback, up to ~10s", short: "LTX 2.5 (Modal)", blurb: "Fallback, up to ~10s per scene" },
-  { id: "talk", label: "InfiniteTalk — lip-synced to your voice (keyed off until smoke test)", short: "InfiniteTalk (keyed off)", blurb: "Audio-driven lips, clip follows the line — smoke test pending" },
 ];
 
 export const LANGS = ["pidgin", "yoruba", "hausa", "igbo", "nigerian-english"];

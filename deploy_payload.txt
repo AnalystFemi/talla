@@ -1,0 +1,21 @@
+﻿DEPLOY SUCCESS — Talla (talla-api + usetalla.pages.dev) — 2026-10-31 10:16 WAT
+
+Worker URL: https://talla-api.rcpt.workers.dev
+  - Version IDs: 281c6659-71cc-46c8-92e9-d7d7c13dd996 -> 5b902ffe-2988-4958-964f-b2c9db9dfa78 after CORS fix
+  - D1: 14e2db4e-d6a4-4111-8e45-662df9267afd, migration 0002_hardening.sql: 10 queries, 78 rows read, bookmark 00000002-00000006-00005115-65fb418550c44f336c670836f7f520ba
+  - Health: https://talla-api.rcpt.workers.dev/api/health => {"ok":true,"service":"talla-api","mode":"live" when auth, providers all true}
+
+Pages: https://usetalla.pages.dev (main), https://16c4b1a6.usetalla.pages.dev (preview deploy)
+  - Project usetalla created (production-branch main), 20 files uploaded, Vite build 297kB js + 47kB css
+
+Steps:
+1. db:migrate ✅ remote D1 0002_hardening.sql
+2. secrets ✅ 15/15 via wrangler secret put (TALLA_ACCESS_CODE, MODAL_ENDPOINT_TOKEN, BASETEN_API_KEY, META_API_KEY, FIRECRAWL_API_KEY, EXA_API_KEY, MODAL_WAN_ENDPOINT, MODAL_WAN_RESULT_ENDPOINT, MODAL_STITCH_ENDPOINT, MODAL_STITCH_RESULT_ENDPOINT, MODAL_FILE_ENDPOINT, MODAL_YARN_ENDPOINT, MODAL_TTS_ENDPOINT, MODAL_TALK_ENDPOINT, MODAL_TALK_RESULT_ENDPOINT) — verified via secret list
+3. wrangler deploy ✅ -> https://talla-api.rcpt.workers.dev
+4. vite build (VITE_API_URL) + pages deploy ✅ -> https://usetalla.pages.dev
+5. ALLOWED_ORIGINS updated to https://usetalla.pages.dev + redeploy ✅ — CORS header verified: Access-Control-Allow-Origin: https://usetalla.pages.dev
+6. health verify ✅ curl returns 200, authorized mode live, r2:true d1:true
+
+Errors recovered: pages deploy initial /accounts//pages 7003 missing account — fixed via pages project create usetalla + CLOUDFLARE_ACCOUNT_ID=0ac7ff501ce61b640bf95ce1bfa77d8f (akinspajo@gmail.com); secrets background job stall auto-recovered.
+
+No blocking failures. All URLs live.
