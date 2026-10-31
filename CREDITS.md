@@ -1,32 +1,47 @@
 # Talla — Credit Management Plan
 
-Goal: finish the hackathon inside budget. Enforced in code (`worker/src/credits.js`), visible live at `GET /api/credits` and in the Studio "Credit guard" panel.
+Goal: finish the hackathon inside a self-imposed **$50 total** (the hackathon issued more; we deliberately spend at most $50). Enforced in code (`worker/src/credits.js`), visible at `GET /api/credits` and in the Studio credit panel.
 
 ## Budgets
-| Provider | Budget | Used for | Rule |
-|---|---|---|---|
-| Baseten | $100 | Muse Spark Open: research, storyboard, script, critic | Default for ALL LLM work |
-| Meta | $150 | Muse Image keyframes ($0.01 each) + rare final Spark 1.3/Wonder passes | Never for routine agent work |
-| Modal | ~$30 (confirm actual) | H3/Wan/LivePortrait/LTX GPUs, TTS, stitch | scaledown_window=60s — idle GPUs stop billing |
-| Firecrawl / Exa | ~$10 each | Research enrichment only | Results cached; never re-scraped |
+| Provider | Cap | Used for |
+|---|---|---|
+| Baseten | $20 | Muse Spark Open: research, storyboard, script, critic, export caption |
+| Meta | $15 | Muse Image keyframes, SAM 3.1 keyframe QC, Muse Voice Transcribe verify |
+| Modal | $10 | Wan 2.2 / LTX 2.5 video, YarnGPT2 / MMS voices, stitch |
+| Firecrawl + Exa | $5 (shared) | Research enrichment only |
+| **Total** | **$50** | Global cap checked in addition to each provider cap |
 
-## Enforcement (already coded)
-1. **Cache first** — identical research/storyboard inputs are served from cache and logged at $0 (`cached: 1` in `credit_log`).
-2. **Critic cap** — max 2 critic attempts per scene, max 2 regenerations per project (`LIMITS`).
-3. **768p first** — H3/Wan generate at base resolution; no direct 2K runs.
-4. **Short clips** — 5–15s per generation, stitched to 25–40s. Never generate a full 40s in one call.
-5. **Budget guard** — `assertBudget()` hard-stops a provider at $0 remaining; Studio warns at 80%.
-6. **Demo mode is free** — with no keys set, every stage runs labelled demo output. Credits only burn after you add keys, stage by stage.
-7. **Engine ladder** — H3 (primary) → Wan 2.2 / LivePortrait (cheap, 1 GPU) → LTX (floor). Expensive engine is tried once, compared, then the ladder decides — not hope.
+## Enforcement (in code)
+1. **Totals come from D1.** When D1 is bound, every request reloads per-provider spend from `credit_log` (one `GROUP BY`), so the guard sees spend from every Worker isolate and poll. Locally (no D1) totals accumulate in memory.
+2. **Guard before every paid call.** `assertBudget` refuses (HTTP 402 `BUDGET_EXHAUSTED`) unless the remaining provider budget **and** the $50 total both cover the cost of the next operation.
+3. **Whole-job gate.** `/generate` estimates the full job and refuses before any Modal submit if it does not fit the Modal budget.
+4. **Charged at spawn.** Modal charges are recorded when a render is spawned, so they are never lost if a poll dies.
+5. **Cache first.** Identical research/storyboard/keyframe inputs are served from cache and logged at $0.
+6. **Warnings.** The credit summary flags any provider (and the total) at 80% used. The critic runs once per scene and never triggers a regeneration (the `LIMITS` retry caps in `credits.js` are defined but not used by any route yet).
+7. **Demo is free.** Without the access code, paid keys are stripped from the request — nothing can be billed.
 
-## Estimated cost per finished video (live mode)
-Research $0.02 + storyboard $0.015 + script $0.02 + 5× Muse Image $0.05 + TTS ~$0.05 + video (H3 ~$1.75 worst case / LivePortrait ~$0.05) + critics ~$0.05 + stitch $0.02 ≈ **$0.25 (LivePortrait path) to ~$2 (all-H3 path)**. At $100 Baseten + $150 Meta that is hundreds of test videos — the binding constraint is Modal GPU time, so the engine ladder matters more than LLM spend.
+Note: `scripts/calibrate_wan.mjs` calls Modal **directly** for its one Wan clip and stitch, so those two calls are not recorded in `credit_log`. Record them by hand from the Modal dashboard.
 
-## Keys checklist (user action — see `.env.example`)
-- [ ] `BASETEN_API_KEY` — unlocks live agents/critic
-- [ ] `META_API_KEY` + endpoint — unlocks Muse Image keyframes
-- [ ] `FIRECRAWL_API_KEY`, `EXA_API_KEY` — unlocks live research enrichment
-- [ ] `AVA_API_KEY` — unlocks Ava MCP for REA findings
-- [ ] Modal: `modal token new` if CLI auth lapses; R2 keys as Modal secrets for uploads
-- [ ] Node upgrade >=22.23.4 — unblocks REA MCP setup
-- Not needed: MiniMax key, YarnGPT key (fallbacks only)
+## Per-operation estimates (UNCALIBRATED)
+| Operation | Estimate | Status |
+|---|---|---|
+| Wan 2.2 clip (720x1280, ≤81 frames, H100) | $1.20 | estimate — realistic range ~$0.70 warm to ~$2.20 cold |
+| LTX 2.5 clip (≤10.6 s, A100-80GB) | $0.60 | estimate |
+| InfiniteTalk clip (480p, voice-length, H100) | $1.50 | UNMEASURED placeholder — engine not deployed, smoke test pending |
+| Voice line (YarnGPT2 / MMS) | $0.03 | estimate |
+| Stitch | $0.03 | estimate |
+| Muse Image still | $0.01 | provider price |
+| Baseten stage call | $0.01–0.02 | estimate |
+
+None of the Modal figures has been measured against an invoice. They are set on the high side so the guard trips early.
+
+## What $10 of Modal actually buys
+At the Wan range above, **one 4-scene Wan film costs roughly $3–7**, and the $10 Modal cap covers **roughly 5–8 Wan clips in total** — about one to two short films. That is the binding constraint, not LLM spend. Calibrate one scene first (`CALIBRATION_RUNBOOK.md`), then replace the estimates in `credits.js` with measured numbers.
+
+## Keys checklist
+- [ ] `TALLA_ACCESS_CODE` — enables live mode for holders of the code
+- [ ] `BASETEN_API_KEY` — live agents / critic
+- [ ] `META_API_KEY` — Muse Image, SAM QC, verify
+- [ ] `FIRECRAWL_API_KEY`, `EXA_API_KEY` — live research enrichment
+- [ ] Modal secret `talla-endpoint-auth` + Worker `MODAL_ENDPOINT_TOKEN` (same value)
+- [ ] Modal endpoint URLs (see `.env.example`)
