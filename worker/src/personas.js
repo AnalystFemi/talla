@@ -101,16 +101,28 @@ export const YARN_LANGS = { "nigerian-english": "english", english: "english", y
 
 /**
  * Decide, for one scene, where the spoken track comes from.
- * Returns { source: "yarn"|"mms", voice, warning? }. H3 is parked, so even
- * English ships local-voice: YarnGPT2 wav generated first, stitch muxes
- * it onto the silent Wan/LTX picture. MMS covers Pidgin (single speaker).
+ * Returns { source: "yarn"|"mms", voice, fallback?, warning? }. H3 is parked,
+ * so even English ships local-voice: YarnGPT2 wav generated first, stitch
+ * muxes it onto the silent Wan/LTX picture. MMS covers Pidgin (single speaker).
+ *
+ * YORUBA GUARD (WP-F): when the persona has no Yoruba voice mapped, we fall
+ * back to English EXPLICITLY (fallback: "english", warning set) instead of
+ * silently sending `voice: undefined` to YarnGPT. Callers surface the warning
+ * in the Studio voice panel so the owner hears the mismatch coming.
  */
 export function voiceRoute(language, persona) {
   const lang = (language || "pidgin").toLowerCase();
   const yarnLang = YARN_LANGS[lang];
   if (yarnLang) {
-    return { source: "yarn", voice: persona.yarn_voice[yarnLang],
-             note: "YarnGPT2 local voice first; stitch muxes it onto the silent Wan/LTX picture." };
+    const voice = persona.yarn_voice[yarnLang];
+    if (voice) {
+      return { source: "yarn", voice,
+               note: "YarnGPT2 local voice first; stitch muxes it onto the silent Wan/LTX picture." };
+    }
+    // Guard: persona lacks this language's voice — fall back to its English
+    // voice and SAY SO rather than submitting an undefined voice.
+    return { source: "yarn", voice: persona.yarn_voice.english, fallback: "english",
+             warning: `No ${yarnLang} voice mapped for ${persona.label} — falling back to the English voice (${persona.yarn_voice.english}). Pick a creator with a ${yarnLang} voice for a native read.` };
   }
   // pidgin (and anything unmapped) -> MMS, single fixed speaker.
   return { source: "mms", voice: null,

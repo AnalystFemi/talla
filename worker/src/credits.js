@@ -25,6 +25,7 @@ export const COSTS_USD = {
   "modal:h3_clip": 0.9, // PARKED legacy estimate — no route submits H3 (see worker index.js)
   "modal:wan_clip": 1.20, // 720p H100 estimate, UNCALIBRATED
   "modal:ltx_clip": 0.60, // estimate, uncalibrated
+  "modal:talk_clip": 1.50, // InfiniteTalk 480p H100 estimate, UNMEASURED until the WP-C smoke test
   "modal:tts_scene": 0.03, // estimate, uncalibrated
   "modal:stitch": 0.03, // estimate, uncalibrated
   "firecrawl:scrape": 0.005, "exa:search": 0.005,

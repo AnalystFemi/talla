@@ -299,17 +299,19 @@ export const MODEL_MAP = {
   script: "Muse Spark Open (Baseten)",
   keyframe: "Muse Image 1.0 (Meta)",
   voice: "YarnGPT2 / MMS (Modal, open)",
-  video: { h3: "MiniMax H3 (Modal H200, ON HOLD)", wan: "Wan 2.2 (Modal, primary)", ltx: "LTX 2.5 (Modal, cheapest)" },
+  video: { h3: "MiniMax H3 (Modal H200, ON HOLD)", wan: "Wan 2.2 (Modal, primary)", ltx: "LTX 2.5 (Modal, fallback)" },
   critic: `Muse Spark Open (Baseten) — ${CRITIC_LABEL}`,
   stitch: "ffmpeg composite (Modal)",
   export: "Muse Spark Open (Baseten)",
   verify: "Muse Voice Transcribe 1.0 (Meta, verify stage)",
   segment: "SAM 3.1 (Meta, keyframe QC)",
 };
-const ENGINE_LABEL = { wan: "Wan 2.2", ltx: "LTX 2.5" };
+const ENGINE_LABEL = { wan: "Wan 2.2", ltx: "LTX 2.5", talk: "InfiniteTalk" };
 // Engine duration caps (owner decision 2026-10-30): Wan 720x1280 @16 fps,
-// 81 frames max (~5.06 s) -> 5.0 s; LTX 8n+1 frames @24 fps, cap 257 -> 10.6 s.
-const ENGINE_CAP_S = { wan: 5.0, ltx: 10.6 };
+// 81 frames max (~5.06 s) -> 5.0 s; LTX 8n+1 frames @24 fps, cap 257 -> 10.6 s;
+// InfiniteTalk renders 25 fps up to 1000 frames (40 s) — the clip length is
+// the VOICE length, so its cap is the upstream ceiling, not a freeze guard.
+const ENGINE_CAP_S = { wan: 5.0, ltx: 10.6, talk: 40.0 };
 
 function liveMode(env) {
   return has(env, "BASETEN_API_KEY") || has(env, "META_API_KEY") || has(env, "MODAL_WAN_ENDPOINT");
@@ -317,7 +319,7 @@ function liveMode(env) {
 
 app.get("/api/health", (c) => {
   const authorized = Boolean(c.get("authorized"));
-  return c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["wan", "ltx"], h3_status: "parked", models: MODEL_MAP,
+  return c.json({ ok: true, service: "talla-api", languages: LANGUAGES, engines: ["wan", "ltx", "talk"], h3_status: "parked", models: MODEL_MAP,
     personas: PERSONAS.map((p) => ({ id: p.id, label: p.label, gender: p.gender })),
     access: { required: true, authorized },
     mode: authorized && liveMode(c.env) ? "live" : "demo",
@@ -326,6 +328,7 @@ app.get("/api/health", (c) => {
       firecrawl: has(c.env, "FIRECRAWL_API_KEY"), exa: has(c.env, "EXA_API_KEY"),
       modal_tts: has(c.env, "MODAL_TTS_ENDPOINT"), modal_yarn: has(c.env, "MODAL_YARN_ENDPOINT"),
       modal_wan: has(c.env, "MODAL_WAN_ENDPOINT"), modal_wan_result: has(c.env, "MODAL_WAN_RESULT_ENDPOINT"),
+      modal_talk: has(c.env, "MODAL_TALK_ENDPOINT"), modal_talk_result: has(c.env, "MODAL_TALK_RESULT_ENDPOINT"),
       modal_h3: false, modal_h3_parked: true,
       modal_stitch: has(c.env, "MODAL_STITCH_ENDPOINT"), modal_stitch_result: has(c.env, "MODAL_STITCH_RESULT_ENDPOINT"),
       modal_file: has(c.env, "MODAL_FILE_ENDPOINT"), modal_token: has(c.env, "MODAL_ENDPOINT_TOKEN"),
@@ -472,23 +475,47 @@ function endpoints(env) {
   return {
     tts: e.MODAL_TTS_ENDPOINT, yarn: e.MODAL_YARN_ENDPOINT,
     wan: e.MODAL_WAN_ENDPOINT, wanResult: e.MODAL_WAN_RESULT_ENDPOINT,
+    talk: e.MODAL_TALK_ENDPOINT, talkResult: e.MODAL_TALK_RESULT_ENDPOINT,
     stitch: e.MODAL_STITCH_ENDPOINT, stitchResult: e.MODAL_STITCH_RESULT_ENDPOINT,
   };
 }
 
 async function speakLocal(env, EP, { text, language, persona }) {
   // Returns {audio_url, audio_volume_path, duration_s, engine, voice, warning?}
+  // WP-F: tone-marked Yoruba (diacritics) produced broken 1.1s audio while
+  // plain spelling gave a correct 5.03s. If duration_s is far below ~0.35s
+  // per word, retry once with diacritics stripped and flag it.
   const route = voiceRoute(language, persona);
   if (route.source === "yarn") {
     if (!EP.yarn) throw new Error("MODAL_YARN_ENDPOINT not set (YarnGPT voice app)");
-    const out = await modalCall(env, EP.yarn, { text, language, voice: route.voice, gender: persona.gender }, { timeoutMs: VOICE_TIMEOUT_MS });
-    if (out.error) throw new Error(`voice: ${String(out.error).slice(0, 200)}`);
-    return { ...out, warning: route.warning };
+    const words = String(text || "").split(/\s+/).filter(Boolean).length;
+    const plain = stripDiacritics(text);
+    const attempt = async (t) => {
+      const out = await modalCall(env, EP.yarn, { text: t, language, voice: route.voice, gender: persona.gender }, { timeoutMs: VOICE_TIMEOUT_MS });
+      if (out.error) throw new Error(`voice: ${String(out.error).slice(0, 200)}`);
+      return out;
+    };
+    let out = await attempt(text);
+    let warning = route.warning;
+    const expected = words * 0.35;
+    if (plain !== text && Number(out.duration_s) < expected * 0.5) {
+      const out2 = await attempt(plain);
+      if (Number(out2.duration_s) > Number(out.duration_s)) {
+        out = out2;
+        warning = [warning, `Yoruba diacritics broke the first take (${out.duration_s || "?"}s) — retried with plain spelling (${out2.duration_s || "?"}s).`].filter(Boolean).join(" ");
+      }
+    }
+    return { ...out, warning };
   }
   if (!EP.tts) throw new Error("MODAL_TTS_ENDPOINT not set (MMS voice app)");
   const out = await modalCall(env, EP.tts, { text, language }, { timeoutMs: VOICE_TIMEOUT_MS });
   if (out.error) throw new Error(`voice: ${String(out.error).slice(0, 200)}`);
   return { ...out, warning: route.warning };
+}
+
+// Strip combining diacritical marks (Yoruba tone marks) for the WP-F retry.
+function stripDiacritics(s) {
+  return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 // One Muse Image still for one scene (persona-locked; cached so the same
@@ -573,25 +600,31 @@ function scenePlan(p, sceneLimit) {
 }
 
 function estimateJobUsd(engine, plan) {
-  const clipOp = engine === "ltx" ? "ltx_clip" : "wan_clip";
+  // talk keeps the voice-first order: the clip is driven BY the voice WAV, so
+  // its cost is talk_clip + tts_scene per scene (same shape as wan/ltx).
+  const clipOp = engine === "ltx" ? "ltx_clip" : engine === "talk" ? "talk_clip" : "wan_clip";
   return +(plan.length * (estimateCost("modal", clipOp) + estimateCost("modal", "tts_scene")) + (plan.length ? estimateCost("modal", "stitch") : 0)).toFixed(2);
 }
 
 app.post("/api/projects/:pid/generate", async (c) => {
-  if (!c.get("authorized")) return accessRequired(c);
+  // No access gate: an unauthorised caller already has the demo env (no
+  // Modal endpoints), so its job is a labelled $0 demo film.
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
   if (!p.script) return c.json({ error: "Run script first" }, 400);
   const body = await readJson(c);
   if (body === BAD_JSON) return badJson(c);
   const requestedEngine = String(body.engine || "wan").toLowerCase();
-  const engine = requestedEngine === "ltx" ? "ltx" : "wan"; // H3 is parked server-side, never submitted by this route.
+  // talk (InfiniteTalk) is selectable only when its Modal endpoints are
+  // wired; otherwise it falls back to wan so a job can never request an
+  // engine with no spawn endpoint. H3 is parked server-side, never submitted.
+  const engine = requestedEngine === "ltx" ? "ltx" : requestedEngine === "talk" ? "talk" : "wan";
   const persona = getPersona(body.persona || p.persona || DEFAULT_PERSONA_ID);
   const env = c.env;
   const EP = endpoints(env);
-  // Live only when Wan/LTX spawn + result endpoints are both wired; otherwise
-  // the job stays in clearly labelled demo mode and spends $0.
-  const live = Boolean(EP.wan && EP.wanResult);
+  // Live only when the chosen engine's spawn + result endpoints are both
+  // wired; otherwise the job stays in clearly labelled demo mode and spends $0.
+  const live = Boolean(EP.wan && EP.wanResult) && (engine === "talk" ? Boolean(EP.talk && EP.talkResult) : true);
   const allScenes = p.storyboard?.scenes || [];
   const requestedLimit = Number(body.limit);
   const sceneLimit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 0), allScenes.length) : 0;
@@ -646,7 +679,10 @@ async function runStep(env, job, p) {
   const st = job.state, EP = endpoints(env), N = st.plan.length;
   const persona = getPersona(job.persona);
   const label = ENGINE_LABEL[job.engine];
-  const clipOp = job.engine === "ltx" ? "ltx_clip" : "wan_clip";
+  // talk renders FROM the voice WAV (audio-driven lips, no separate voice
+  // request at clip time), so its per-scene op is talk_clip; wan/ltx keep
+  // their silent-motion ops. Every op is budget-guarded at spawn (WP-C rule 5).
+  const clipOp = job.engine === "ltx" ? "ltx_clip" : job.engine === "talk" ? "talk_clip" : "wan_clip";
   const s = st.plan[st.i], w = st.work[st.i];
   const sceneProgress = (frac) => 20 + ((st.i + frac) / Math.max(N, 1)) * 65;
 
@@ -704,7 +740,7 @@ async function runStep(env, job, p) {
       st.phase = "video_spawn";
       return true;
     }
-    case "video_spawn": { // 2) one Wan/LTX spawn — charged AT SPAWN, never lost
+    case "video_spawn": { // 2) one clip spawn — charged AT SPAWN, never lost
       setStep(job, `Rendering scene ${st.i + 1} of ${N} (${label})`, sceneProgress(0.2));
       const cap = ENGINE_CAP_S[job.engine];
       const seconds = +Math.max(2, Math.min(w.duration_s || s.line.seconds || 5, cap)).toFixed(2);
@@ -716,9 +752,16 @@ async function runStep(env, job, p) {
         if (!dataUrl) throw new Error(`keyframe for scene ${s.n} is not readable`);
         let out;
         try {
-          out = await modalCall(env, EP.wan, { engine: job.engine, keyframe_b64: dataUrl.split(",").pop(),
-            prompt: `${persona.h3_description}. ${s.visual || ""}. Natural talking-head UGC motion, looking into camera, relaxed gestures, no text, no logo.`,
-            seconds, project: { name: p.name, language: st.language } }, { timeoutMs: 60000 });
+          // Talk is audio-driven: keyframe + the voice WAV from the voice
+          // phase (already on the volume). It MUST have a voice — a talk
+          // clip with no audio is a silent failure, so skip before spending.
+          const spawnEp = job.engine === "talk" ? EP.talk : EP.wan;
+          const payload = job.engine === "talk"
+            ? (() => { if (!w.audio_volume_path) throw new Error(`scene ${s.n}: talk engine needs its voice WAV first — voice phase produced none`); return { keyframe_b64: dataUrl.split(",").pop(), audio_volume_path: w.audio_volume_path, prompt: `${persona.h3_description}. ${s.visual || ""}.` }; })()
+            : { engine: job.engine, keyframe_b64: dataUrl.split(",").pop(),
+              prompt: `${persona.h3_description}. ${s.visual || ""}. Natural talking-head UGC motion, looking into camera, relaxed gestures, no text, no logo.`,
+              seconds, project: { name: p.name, language: st.language } };
+          out = await modalCall(env, spawnEp, payload, { timeoutMs: 60000 });
         } catch (e) { if (e.ambiguous) await charge(env, "modal", clipOp, job.project_id); throw e; }
         await charge(env, "modal", clipOp, job.project_id);
         if (out.error) throw new Error(`${job.engine} scene ${s.n}: ${String(out.error).slice(0, 160)}`);
@@ -735,7 +778,13 @@ async function runStep(env, job, p) {
     case "video_poll": { // non-blocking single result check
       const elapsed = Math.round((Date.now() - (w.spawned_at || Date.now())) / 1000);
       setStep(job, `Rendering scene ${st.i + 1} of ${N} (${label}) — ${elapsed}s`, sceneProgress(0.2 + Math.min(elapsed / 600, 1) * 0.7));
-      const r = await modalPollOnce(env, EP.wanResult, w.call_id);
+      // Talk has its own result endpoint; wan/ltx share theirs.
+      // WP-H: a missing result endpoint or a poll throw must never kill the
+      // job — the scene is marked failed with the reason and the run moves on.
+      let r;
+      try {
+        r = await modalPollOnce(env, job.engine === "talk" ? EP.talkResult : EP.wanResult, w.call_id);
+      } catch (e) { w.failed = `${job.engine} scene ${s.n}: result check failed (${String(e.message).slice(0, 120)})`; st.phase = "critic"; return true; }
       if (r.status === "complete") {
         if (r.error) w.failed = `${job.engine} scene ${s.n}: ${String(r.error).slice(0, 160)}`;
         else acceptClip(st, s, w, r);
@@ -789,8 +838,7 @@ async function runStep(env, job, p) {
     }
     case "stitch_poll": {
       setStep(job, "Stitching the film (voice + captions + AI label)", 90);
-      const r = await modalPollOnce(env, EP.stitchResult, st.stitch.call_id);
-      if (r.status === "complete") { if (r.error) job.stitch_error = String(r.error).slice(0, 200); else acceptFinal(job, r); st.phase = "verify"; }
+      const r = await modalPollOnce(env, EP.stitchResult, st.stitch.call_id);      if (r.status === "complete") { if (r.error) job.stitch_error = String(r.error).slice(0, 200); else acceptFinal(job, r); st.phase = "verify"; }
       else if (r.status === "error") { job.stitch_error = String(r.error || "stitch failed").slice(0, 200); st.phase = "verify"; }
       else if (Date.now() - st.stitch.spawned_at > 12 * 60 * 1000) { job.stitch_error = "stitch timed out after 12 min"; st.phase = "verify"; } // stitch app itself times out at 600 s
       return true;
@@ -804,6 +852,8 @@ async function runStep(env, job, p) {
       const idx = st.work.findIndex((x) => x.audio_volume_path && x.clip_volume_path);
       const ref = idx >= 0 ? st.work[idx].audio_volume_path : null;
       job.verification = await verifySpoken(env, p, ref, idx >= 0 ? st.plan[idx].line.text : (st.plan[0]?.line.text || ""), st.language);
+      // Honest scope label: later scenes are never checked, so the UI (and
+      // any owner decision about Whisper-on-Modal) sees exactly what ran.
       job.verification.scope = idx >= 0 ? `scene ${st.plan[idx].n} vs its script line` : "no shipped voice";
       st.phase = "export";
       return job.verification.status === "complete" || job.verification.status === "deferred";
@@ -824,12 +874,21 @@ async function runStep(env, job, p) {
 }
 
 function acceptClip(st, s, w, out) {
+  // WP-H: accept EITHER clip_volume_path (Modal volume) OR clip_url (https) —
+  // never fail a rendered scene on a naming technicality. A scene counts as
+  // rendered when the engine gave us anything playable or volume-addressable.
   const name = out.clip_volume_path || volumeBasename(out.clip_url);
-  if (!name) { w.failed = `scene ${s.n}: engine returned no clip path`; return; }
-  w.clip_volume_path = name;
-  w.clip_url = mediaUrl(volumeBasename(name)) || (/^https?:/.test(out.clip_url || "") ? out.clip_url : null);
+  const url = /^https?:/.test(out.clip_url || "") ? out.clip_url : null;
+  if (!name && !url) { w.failed = `scene ${s.n}: engine returned no clip path`; return; }
+  w.clip_volume_path = name || null;
+  w.clip_url = mediaUrl(volumeBasename(name)) || url;
+  // Talk clips already carry the voice (muxed at render): stitch must NOT
+  // receive the WAV again or the film would double the voice. Silent-engine
+  // clips still need their voice WAV muxed at stitch.
+  const talkAudio = out.has_audio === true || out.engine === "infinitetalk";
+  if (talkAudio) w.voice = { ...(w.voice || {}), engine: "infinitetalk", muxed: true };
   st.clipPaths.push(name);
-  st.audioPaths.push(w.audio_volume_path || null);
+  st.audioPaths.push(talkAudio ? null : (w.audio_volume_path || null));
   st.overlays.push(s.overlay || null);
   st.lines.push(s.line);
 }
@@ -902,8 +961,12 @@ async function advanceJob(env, job) {
 
 app.get("/api/jobs/:jid", async (c) => {
   // Steps run with the RAW env: the job was authorised and budget-gated at
-  // creation, so an anonymous poll may advance it but never widen it.
-  const env = c.get("raw_env");
+  // creation, so an anonymous poll may advance it but never widen it. A demo
+  // job (e.g. started by a public visitor) is always stepped with the demo
+  // env, so polling it can never reach a paid provider.
+  const raw = c.get("raw_env");
+  const peek = await getJob(raw, c.req.param("jid"));
+  const env = peek?.mode === "live" ? raw : demoEnv(raw);
   const jid = c.req.param("jid");
   let job = await getJob(env, jid);
   if (!job) return c.json({ error: "Job not found" }, 404);
@@ -918,9 +981,11 @@ app.get("/api/jobs/:jid", async (c) => {
 
 // Verify (Muse Voice Transcribe): transcribe the SPOKEN audio that will
 // actually ship and compare it against the script, so "the video says our
-// exact words" is checked, not assumed. The voice lives in the Modal
-// volume; it is fetched through the token-gated file endpoint. NEVER
-// throws: a verify failure must not fail a completed film.
+// exact words" is checked, not assumed. SCOPE: the FIRST voiced scene only
+// (the first scene with both a voice track and a rendered clip); the UI
+// labels it "first voiced scene" because later scenes are never checked.
+// The voice lives in the Modal volume; it is fetched through the token-gated
+// file endpoint. NEVER throws: a verify failure must not fail a completed film.
 async function verifySpoken(env, p, audioRef, expectedText, language) {
   const out = { status: "skipped", expected: expectedText || "", heard: null, similarity: null, words: null, note: null };
   if (!has(env, "META_API_KEY")) { out.note = "META_API_KEY not set — verify skipped."; return out; }
@@ -1037,6 +1102,39 @@ app.post("/api/projects/:pid/keyframes/seed", async (c) => {
   p.segmentation = (p.segmentation || []).filter((r) => r.scene !== scene); // new still -> fresh QC
   await saveProject(c.env, p);
   return c.json({ project_id: p.id, seeded: scene, keyframes: publicProject(p).keyframes.map((f) => ({ scene: f.scene, source: f.source, keyframe_url: f.keyframe_url?.startsWith("/api/") ? f.keyframe_url : undefined })) });
+});
+
+// Proof overlay upload (WP-G): attach a REAL asset (rcpt screen recording or
+// before/after image) to a scene. Stored in R2 under the project; the R2 key
+// is recorded on the scene overlay so stitch composites the real card —
+// never an AI-drawn placeholder. Body: { scene, asset: data:video|image/... }.
+// Size-limited (8 MB); storyboard PUT keeps the overlay intent, the R2 key is
+// the proof it exists. Free to attach; compositing happens at paid stitch.
+app.post("/api/projects/:pid/overlays", async (c) => {
+  if (!c.get("authorized")) return accessRequired(c);
+  const p = await getProject(c.env, c.req.param("pid"));
+  if (!p) return c.json({ error: "Project not found" }, 404);
+  if (!p.storyboard) return c.json({ error: "Run storyboard first" }, 400);
+  const body = await readJson(c, 8 * 1024 * 1024);
+  if (body === BAD_JSON) return badJson(c);
+  const scene = Number(body.scene);
+  const m = String(body.asset || "").match(/^data:(video\/mp4|video\/webm|image\/png|image\/jpe?g|image\/webp);base64,(.+)$/i);
+  if (!Number.isInteger(scene) || scene < 1 || !m) return c.json({ error: "Body must be { scene: number, asset: data:video/mp4|webm|image/...;base64,… } (max 8 MB)" }, 400);
+  const sc = p.storyboard.scenes.find((s) => s.n === scene);
+  if (!sc) return c.json({ error: `Scene ${scene} is not in this storyboard` }, 404);
+  const ext = m[1].startsWith("video/") ? (m[1].endsWith("webm") ? "webm" : "mp4") : (m[1].endsWith("png") ? "png" : m[1].endsWith("webp") ? "webp" : "jpg");
+  const key = `proof/${p.id}/scene-${scene}.${ext}`;
+  // R2 when bound (deployed); local dev without R2 keeps the data URL inline
+  // on the project (8 MB cap keeps the D1 row safe), same as keyframe seeding.
+  if (c.env?.MEDIA) {
+    try { await c.env.MEDIA.put(key, base64ToBytes(m[2]), { httpMetadata: { contentType: m[1].toLowerCase() } }); }
+    catch (e) { return failure(c, "overlays", e); }
+    sc.overlay = { ...(typeof sc.overlay === "object" ? sc.overlay : {}), asset: `/api/media/r2/${key}`, style: sc.overlay?.style || "pip", real: true };
+  } else {
+    sc.overlay = { ...(typeof sc.overlay === "object" ? sc.overlay : {}), asset: `data:${m[1].toLowerCase()};base64,${m[2]}`, style: sc.overlay?.style || "pip", real: true };
+  }
+  await saveProject(c.env, p);
+  return c.json({ project_id: p.id, scene, overlay: sc.overlay }, 201);
 });
 
 // SAM 3.1 QC on the project's keyframes (advisory — never blocks filming).

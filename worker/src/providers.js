@@ -84,7 +84,10 @@ export async function exaSearch(env, query) {
 /** Muse Voice Transcribe 1.0 via Meta Model API — VERIFY stage.
  *  One-shot probe: we post the WAV (multipart or JSON-b64) and TOLERATE the
  *  response shape, since the exact transcription wire format is not yet
- *  documented against our key. Never let this throw into generation. */
+ *  documented against our key. Never let this throw into generation.
+ *  SCOPE (honest): verify checks the FIRST voiced scene only — the reference
+ *  audio + expected line are that scene's own (see verifySpoken in index.js),
+ *  and the UI labels it "first voiced scene" everywhere. */
 export async function museTranscribe(env, wavB64, { language } = {}) {
   const base = (env.META_BASE_URL || "https://api.meta.ai/v1").replace(/\/$/, "");
   const body = { model: env.MUSE_TRANSCRIBE_MODEL || "muse-voice-transcribe-1.0",
