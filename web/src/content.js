@@ -39,8 +39,8 @@ export const STAGE_LABELS = { research: "Research", storyboard: "Storyboard", sc
 export const ENGINES = [
   { id: "talk", label: "InfiniteTalk — lip-synced to your voice, any length (recommended)", short: "InfiniteTalk (recommended)", blurb: "Audio-driven lips, clip follows the line — any length" },
   { id: "wan", label: "Wan 2.2 — 720p vertical, ~5s per scene (fallback)", short: "Wan 2.2 (fallback)", blurb: "Silent motion 720p, ~5s per scene (fallback)" },
-  { id: "ltx", label: "LTX 2.5 — fallback, up to ~10s", short: "LTX 2.5 (Modal)", blurb: "Fallback, up to ~10s per scene" },
 ];
+// LTX 2.5 parked — gated (FemiML 403, see docs/ltx-setup.md). kept in API for old jobs, hidden from Studio per WP-D decision.
 
 export const LANGS = ["pidgin", "yoruba", "hausa", "igbo", "nigerian-english"];
 export const LANG_LABELS = { pidgin: "Pidgin", yoruba: "Yoruba", hausa: "Hausa", igbo: "Igbo", "nigerian-english": "Nigerian English" };
