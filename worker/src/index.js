@@ -303,11 +303,11 @@ export const MODEL_MAP = {
   script: "Muse Spark Open (Baseten)",
   keyframe: "Muse Image 1.0 (Meta)",
   voice: "YarnGPT2 / MMS (Modal, open)",
-  video: { h3: "MiniMax H3 (Modal H200, ON HOLD)", wan: "Wan 2.2 (Modal, primary)", ltx: "LTX 2.5 (Modal, fallback)" },
+  video: { h3: "MiniMax H3 (Modal H200, ON HOLD)", wan: "Wan 2.2 (Modal, silent fallback)", ltx: "LTX 2.5 (Modal, gated fallback)", talk: "InfiniteTalk (Modal, lip-synced primary)" },
   critic: `Muse Spark Open (Baseten) — ${CRITIC_LABEL}`,
   stitch: "ffmpeg composite (Modal)",
   export: "Muse Spark Open (Baseten)",
-  verify: "Muse Voice Transcribe 1.0 (Meta, verify stage)",
+  verify: "Muse Voice Transcribe 1.0 (Meta, verify stage — honest: 404, shows deferred)",
   segment: "SAM 3.1 (Meta, keyframe QC)",
 };
 const ENGINE_LABEL = { wan: "Wan 2.2", ltx: "LTX 2.5", talk: "InfiniteTalk" };
@@ -318,7 +318,7 @@ const ENGINE_LABEL = { wan: "Wan 2.2", ltx: "LTX 2.5", talk: "InfiniteTalk" };
 const ENGINE_CAP_S = { wan: 5.0, ltx: 10.6, talk: 40.0 };
 
 function liveMode(env) {
-  return has(env, "BASETEN_API_KEY") || has(env, "META_API_KEY") || has(env, "MODAL_WAN_ENDPOINT");
+  return has(env, "BASETEN_API_KEY") || has(env, "META_API_KEY") || has(env, "MODAL_WAN_ENDPOINT") || has(env, "MODAL_TALK_ENDPOINT");
 }
 
 app.get("/api/health", (c) => {

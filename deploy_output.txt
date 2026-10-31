@@ -1,1 +1,0 @@
-﻿DEPLOY DONE: Worker https://talla-api.rcpt.workers.dev | Pages https://usetalla.pages.dev | Health OK

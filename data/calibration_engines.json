@@ -1,0 +1,24 @@
+{
+  "at": "2026-10-31T09:16:30.834Z",
+  "line": "Mi o ko iwe isanwo pelu owo mo. rcpt lo n se e fun mi bayi, onibara mi si n gbekele mi ju ti tele lo.",
+  "persona": "funmi",
+  "language": "yoruba",
+  "runs": {
+    "talk": {
+      "seconds_requested": 5.027,
+      "clip_wall_s": 483.6,
+      "clip_volume_path": "talk_1793438660_4b7b7552.mp4",
+      "num_frames": 125,
+      "fps": 25,
+      "call_id": "fc-01M68KY93S9Y6KN5ATT5SM5YSG",
+      "stitch_wall_s": 28.5,
+      "final_volume_path": "final_1793438692_9896a40a.mp4",
+      "final_duration_s": 5.014
+    }
+  },
+  "voice": {
+    "seconds_to_generate": 0,
+    "duration_s": 5.027,
+    "volume_path": "yarn_1793393529_17112a4c.wav"
+  }
+}

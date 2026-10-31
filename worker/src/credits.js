@@ -14,10 +14,9 @@ export const BUDGETS_USD = {
 
 // Estimated cost per operation (USD). Update with real provider pricing.
 // The modal:* video/voice/stitch figures are ESTIMATES pending calibration
-// (no measured invoice yet): wan_clip assumes one 720x1280 Wan 2.2 clip on
-// an H100 incl. a share of cold start; ltx_clip a ~10 s LTX clip; tts_scene
-// one YarnGPT2/MMS line; stitch one ffmpeg composite. Deliberately on the
-// HIGH side so the $50 guard trips early rather than late.
+// (talk now measured 2026-10-31: 483.6 s wall for 5 s clip ≈ $0.53 on H100
+// $3.95/h + ~$0.03 stitch = $0.56; rounded to $0.60 guard). Deliberately on
+// the HIGH side so the $50 guard trips early rather than late.
 export const COSTS_USD = {
   "baseten:research": 0.02, "baseten:storyboard": 0.015, "baseten:script": 0.02,
   "baseten:critic": 0.01, "baseten:export": 0.01, "meta:muse_image": 0.01, "meta:spark_final": 0.05,
@@ -25,7 +24,7 @@ export const COSTS_USD = {
   "modal:h3_clip": 0.9, // PARKED legacy estimate — no route submits H3 (see worker index.js)
   "modal:wan_clip": 1.20, // 720p H100 estimate, UNCALIBRATED
   "modal:ltx_clip": 0.60, // estimate, uncalibrated
-  "modal:talk_clip": 1.50, // InfiniteTalk 480p H100 estimate, UNMEASURED until the WP-C smoke test
+  "modal:talk_clip": 0.60, // measured 2026-10-31: 483.6 s H100 for 5.027 s Yoruba (talk_1793438660_4b7b7552.mp4)
   "modal:tts_scene": 0.03, // estimate, uncalibrated
   "modal:stitch": 0.03, // estimate, uncalibrated
   "firecrawl:scrape": 0.005, "exa:search": 0.005,

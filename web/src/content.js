@@ -23,15 +23,15 @@ export const PIPELINE = [
   ["Script", "Local-language lines, one idea per scene · Muse Spark Open"], ["Keyframe", "Persona-locked photoreal stills · Muse Image 1.0"],
   ["Keyframe QC", "Advisory person + phone check on each still · SAM 3.1"], ["Voice", "Open Nigerian speech · YarnGPT2 / MMS"],
   ["Video", "Lip-synced to voice · InfiniteTalk (primary, any length) / Wan 2.2 (fallback, silent ~5s)"], ["Critic", "Plan & script critic (advisory) · Muse Spark Open"],
-  ["Verify", "First voiced scene transcribed and checked vs script · Muse Voice Transcribe"], ["Film", "Captioned 9:16 film + AI-generated label · ffmpeg"],
+  ["Verify", "First voiced scene check — honest deferred (Meta 404, Whisper-on-Modal option) — never faked"], ["Film", "Captioned 9:16 film + AI-generated label · ffmpeg"],
   ["Export", "Caption + 5–8 hashtags, ready to paste · Muse Spark Open"],
 ];
 
 // Fallbacks only — the live names come from /api/health `models`.
 export const MODEL_BADGES = { research: "Muse Spark Open (Baseten)", storyboard: "Muse Spark Open (Baseten)",
   script: "Muse Spark Open (Baseten)", keyframe: "Muse Image 1.0 (Meta)", segment: "SAM 3.1 (Meta, keyframe QC)",
-  voice: "YarnGPT2 / MMS (Modal)", video: "InfiniteTalk (Modal, lip-synced)", critic: "Muse Spark Open (Baseten)",
-  stitch: "ffmpeg composite (Modal)", verify: "Muse Voice Transcribe 1.0 (Meta)", export: "Muse Spark Open (Baseten)" };
+  voice: "YarnGPT2 / MMS (Modal)", video: "InfiniteTalk (Modal, lip-synced primary)", critic: "Muse Spark Open (Baseten)",
+  stitch: "ffmpeg composite (Modal)", verify: "Verify — honest deferred (Meta 404)", export: "Muse Spark Open (Baseten)" };
 
 export const STAGE_LABELS = { research: "Research", storyboard: "Storyboard", script: "Brain", keyframe: "Keyframe", segment: "QC",
   voice: "Voice", video: "Video", critic: "Critic (advisory)", stitch: "Stitch", verify: "Verify", export: "Export" };

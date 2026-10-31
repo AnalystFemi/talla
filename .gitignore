@@ -14,3 +14,14 @@ data/*.mp4
 # third-party reference frames / heavy media (review 2026-10-30)
 data/ref_frame_*.png
 data/ref_seedance_*
+
+# agent temp artefacts — never commit
+.playwright-cli/
+deploy_*.md
+deploy_*.txt
+parent*.txt
+PARENT*.md
+LTX_OWNER*.txt
+__parent*.json
+shots/
+data/funmi_keyframe_v*.txt

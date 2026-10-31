@@ -7,7 +7,7 @@ Goal: finish the hackathon inside a self-imposed **$50 total** (the hackathon is
 |---|---|---|
 | Baseten | $20 | Muse Spark Open: research, storyboard, script, critic, export caption |
 | Meta | $15 | Muse Image keyframes, SAM 3.1 keyframe QC, Muse Voice Transcribe verify |
-| Modal | $10 | Wan 2.2 / LTX 2.5 video, YarnGPT2 / MMS voices, stitch |
+| Modal | $10 | InfiniteTalk (primary) / Wan 2.2 / LTX 2.5 video, YarnGPT2 / MMS voices, stitch |
 | Firecrawl + Exa | $5 (shared) | Research enrichment only |
 | **Total** | **$50** | Global cap checked in addition to each provider cap |
 
@@ -22,21 +22,21 @@ Goal: finish the hackathon inside a self-imposed **$50 total** (the hackathon is
 
 Note: `scripts/calibrate_wan.mjs` calls Modal **directly** for its one Wan clip and stitch, so those two calls are not recorded in `credit_log`. Record them by hand from the Modal dashboard.
 
-## Per-operation estimates (UNCALIBRATED)
+## Per-operation estimates (talk measured)
 | Operation | Estimate | Status |
 |---|---|---|
-| Wan 2.2 clip (720x1280, ≤81 frames, H100) | $1.20 | estimate — realistic range ~$0.70 warm to ~$2.20 cold |
-| LTX 2.5 clip (≤10.6 s, A100-80GB) | $0.60 | estimate |
-| InfiniteTalk clip (480p, voice-length, H100) | $1.50 | UNMEASURED placeholder — engine not deployed, smoke test pending |
+| **InfiniteTalk clip (480p, voice-length, H100)** | **$0.60** | **measured 2026-10-31: 483.6 s for 5.027 s Yoruba → ~$0.53 + stitch $0.03 = $0.56, rounded to $0.60 guard** |
+| Wan 2.2 clip (720x1280, ≤81 frames, H100) | $1.20 | estimate — realistic range ~$0.70 warm to ~$2.20 cold (measured 2026-10-30: 5 s ~$1.90) |
+| LTX 2.5 clip (≤10.6 s, A100-80GB) | $0.60 | estimate, gated |
 | Voice line (YarnGPT2 / MMS) | $0.03 | estimate |
 | Stitch | $0.03 | estimate |
 | Muse Image still | $0.01 | provider price |
 | Baseten stage call | $0.01–0.02 | estimate |
 
-None of the Modal figures has been measured against an invoice. They are set on the high side so the guard trips early.
+Modal figures are now partly measured; guard stays on the high side so it trips early.
 
 ## What $10 of Modal actually buys
-At the Wan range above, **one 4-scene Wan film costs roughly $3–7**, and the $10 Modal cap covers **roughly 5–8 Wan clips in total** — about one to two short films. That is the binding constraint, not LLM spend. Calibrate one scene first (`CALIBRATION_RUNBOOK.md`), then replace the estimates in `credits.js` with measured numbers.
+At the measured Talk rate (**~$0.60 per scene + $0.03 stitch share**), a 6-scene Talk film costs **~$3.60–4.00**; the $10 cap covers **~16 scenes (~2–3 short films)**. At Wan's $1.20 range, a 4-scene Wan film was ~$3–7 for 5–8 clips total. Talk is ~3.6× cheaper/faster than Wan (483.6 s vs 1737.9 s for 5 s). Calibrate one scene first (`CALIBRATION_RUNBOOK.md`).
 
 ## Keys checklist
 - [ ] `TALLA_ACCESS_CODE` — enables live mode for holders of the code
