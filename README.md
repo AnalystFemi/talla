@@ -317,4 +317,4 @@ Talla enforces a self-imposed **$50 total** budget in code (see [`CREDITS.md`](C
 
 ---
 
-© 2026 Talla. Built for West African social commerce. All rights reserved.
+Released under the [MIT License](LICENSE). Built for West African social commerce.
