@@ -103,7 +103,9 @@ for (const engine of engines) {
   // Talk payload: keyframe + the voice WAV already on the volume. Silent
   // engines take {engine, seconds, prompt}; talk takes {audio_volume_path}.
   const clipPayload = engine === "talk"
-    ? { keyframe_b64: b64, audio_volume_path: voice.audio_volume_path, prompt: PROMPT }
+    ? { keyframe_b64: b64, audio_volume_path: voice.audio_volume_path, prompt: PROMPT,
+        ...(process.env.CAL_STEPS ? { steps: Number(process.env.CAL_STEPS) } : {}),
+        ...(process.env.CAL_SEED ? { seed: Number(process.env.CAL_SEED) } : {}) }
     : { engine, keyframe_b64: b64, seconds, prompt: PROMPT, project: { name: "rcpt", language: "yoruba" } };
   try {
     const clip = await spawnPoll(spawnUrl, resultUrl, clipPayload, 45 * 60 * 1000);

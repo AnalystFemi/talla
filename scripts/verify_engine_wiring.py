@@ -266,7 +266,10 @@ for name, (src, g) in apps.items():
     for obj in g["app"].registered:
         k = obj._modal_kwargs
         if k.get("gpu"):
-            check(k.get("max_containers") == 1, f"{name}.{obj.__name__}: GPU without max_containers=1")
+            # Parallel scenes (2026-11-02): talk may fan out to 6, LTX B-roll to 3;
+            # every other GPU stays at 1. Each is still an explicit hard cap.
+            cap = {"TalkEngine": 6, "LTXEngine": 3}.get(obj.__name__, 1)
+            check(k.get("max_containers") == cap, f"{name}.{obj.__name__}: GPU without max_containers={cap}")
             check(k.get("timeout"), f"{name}.{obj.__name__}: GPU without explicit timeout")
     if any(o._modal_kwargs.get("volumes") for o in g["app"].registered):
         check(PROTOBUF_PIN in g["image"].pip, f"{name}: mounts volumes but image lacks {PROTOBUF_PIN}")
@@ -289,7 +292,7 @@ check("TalkEngine" in tsrc, "talk_app lost the TalkEngine class")
 talk = next(o for o in apps["talk_app"][1]["app"].registered if o.__name__ == "TalkEngine")
 check(talk._modal_kwargs.get("gpu") == "H100", "TalkEngine gpu should be H100")
 check(talk._modal_kwargs.get("timeout") == 1800, "TalkEngine timeout should be 1800")
-check(talk._modal_kwargs.get("max_containers") == 1, "TalkEngine max_containers should be 1")
+check(talk._modal_kwargs.get("max_containers") == 6, "TalkEngine max_containers should be 6")
 
 print("[4b] Wan / LTX engine wiring")
 wsrc = apps["wan_app"][0]
@@ -308,7 +311,7 @@ for secs, want in [(1, 25), (5, 121), (10.6, 257), (15, 257)]:
 for s in [x / 4 for x in range(0, 70)]:
     f = wan["ltx_frames"]({"seconds": s or 0.1})
     check((f - 1) % 8 == 0 and f <= 257, f"ltx_frames({s}) off-grid: {f}")
-for cls_name, gpu in [("WanEngine", "H100"), ("LTXEngine", "A100-80GB")]:
+for cls_name, gpu in [("WanEngine", "H100"), ("LTXEngine", "H200")]:
     cls = next(o for o in wan["app"].registered if o.__name__ == cls_name)
     check(cls._modal_kind == "cls" and getattr(cls.load, "_enter", False), f"{cls_name} must be @app.cls with @modal.enter load")
     check(cls._modal_kwargs.get("gpu") == gpu, f"{cls_name} gpu should be {gpu}")
@@ -356,8 +359,8 @@ for needle, msg in [
     ('engines: ["wan", "ltx", "talk"]', "health engines list missing talk"),
     ('"modal:talk_clip"', "credits missing modal:talk_clip estimate"),
     ("talk_clip", "worker missing talk_clip op (estimateJobUsd / runStep)"),
-    ("job.engine === \"talk\" ? EP.talk : EP.wan", "video_spawn not routing talk to EP.talk"),
-    ("job.engine === \"talk\" ? EP.talkResult : EP.wanResult", "video_poll not routing talk to EP.talkResult"),
+    ("eng === \"talk\" ? EP.talk : EP.wan", "video_spawn not routing talk to EP.talk"),
+    ("eng === \"talk\" ? EP.talkResult : EP.wanResult", "video_poll not routing talk to EP.talkResult"),
     ("talkAudio", "acceptClip lost the talk muxed-audio guard (stitch would double the voice)"),
     ("talk engine needs its voice WAV first", "video_spawn lost the talk no-voice-before-spend guard"),
     ('ENGINE_CAP_S = { wan: 5.0, ltx: 10.6, talk: 40.0 }', "ENGINE_CAP_S missing talk 40.0"),
@@ -381,7 +384,7 @@ check("first voiced scene" in widx, "verify lost the honest scope comment (WP-E)
 # WP-H robustness: poll failures degrade, timeouts cancel the GPU call
 check("result check failed" in widx, "video_poll lost the WP-H degrade-on-poll-failure guard")
 check("modalCancel" in widx, "worker lost the WP-H abandon-cancel (GPU keeps billing on timeout)")
-check("modalCancel(env, job.engine" in widx, "video_poll lost the WP-H scene-timeout cancel")
+check("await modalCancel(env, eng === \"talk\"" in widx, "video_poll lost the WP-H scene-timeout cancel")
 check("modalCancel(env, EP.stitch" in widx, "stitch_poll lost the WP-H stitch-timeout cancel")
 print("[5c] stitch_app + talk_app cancel endpoints (WP-H: abandoned calls stop billing)")
 for app_name, cancel_fn in [("stitch_app", "stitch_cancel"), ("talk_app", "cancel_http"), ("wan_app", "cancel_http")]:
@@ -448,7 +451,7 @@ if shutil.which("ffmpeg") and shutil.which("ffprobe"):
                             encoding="utf-8")
         font = "C:/Windows/Fonts/arial.ttf" if os.path.exists("C:/Windows/Fonts/arial.ttf") else None
         final = work / "final_test.mp4"
-        run(st["concat_cmd"]([str(seg_a_ov), str(seg_b)], str(final), str(srt_path), label=True, label_font_file=font))
+        run(st["concat_cmd"]([str(seg_a_ov), str(seg_b)], str(final), str(srt_path), label=False, label_font_file=font))
         info = ffprobe(final)
         v = next(s for s in info["streams"] if s["codec_type"] == "video")
         au = next(s for s in info["streams"] if s["codec_type"] == "audio")

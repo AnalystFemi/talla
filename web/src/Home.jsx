@@ -41,9 +41,9 @@ const THREAD = [
   { who: "researcher", text: "Found 3 pain points for rcpt: buyers don't trust vendors without a proper receipt, handwritten ones look unserious, and sales get lost in chats." },
   { who: "scriptwriter", text: "Storyboard ready — confession format, 6 scenes. Hook in Pidgin: “I no dey send receipt before. Na why customers no trust me.”", cards: true },
   { who: "me", text: "Approved. Film scene 1 first." },
-  { who: "voice", text: "Scene 1 voiced in Pidgin with open Nigerian TTS. Handing it to the Editor." },
+  { who: "voice", text: "Scene 1 voiced in Nigerian Pidgin. Handing it to the Editor." },
   { who: "critic", label: "Critic · advisory", text: "Note on the plan: scene 3's line is long for a ~5 second clip — trim it so the voice doesn't rush." },
-  { who: "editor", text: "Filming scene 1 with Wan 2.2 (720p, ~5s), then stitching captions and the AI-generated label." },
+  { who: "editor", text: "Filming scene 1 (portrait 9:16), then stitching the captions." },
 ];
 const SCENES = [["1", "Hook", "Close-up, talking to camera"], ["2", "Pain", "Scrolling unpaid WhatsApp chats"], ["3", "Switch", "Opens rcpt on her phone"], ["4", "Proof", "Branded receipt, real screen"]];
 
@@ -112,10 +112,10 @@ function DemoPanel() {
 const HANDOFF = [
   ["Market research", "researcher", "Your Researcher finds the pain points, hooks and angles that sell in your category — no link hunting."],
   ["Scripts in your customers' language", "scriptwriter", "Hooks and scenes written in Pidgin, Yoruba, Hausa, Igbo or Nigerian English, one idea per scene."],
-  ["Voices in Pidgin, Yoruba, Hausa & Igbo", "voice", "Open Nigerian TTS speaks every line. The first voiced scene is transcribed and checked against your script."],
-  ["Filming without a shoot", "editor", "Persona-locked stills from Muse Image, brought to life by Wan 2.2 at 720p (~5s per scene), with LTX 2.5 as fallback."],
+  ["Voices in Pidgin, Yoruba, Hausa & Igbo", "voice", "Natural West African voices speak every line in Pidgin, Yoruba, Hausa, or Igbo. The first voiced scene is verified against your script."],
+  ["Filming without a shoot", "editor", "Persona-locked creator portraits, lip-synced to the voice with realistic product cutaways."],
   ["A second opinion on every scene", "critic", "The Critic leaves advisory notes on each scene's plan and spoken line. It never blocks a run — you decide."],
-  ["Captions & posting", "editor", "Captions burnt in, AI-generated label added, 9:16 for TikTok, Reels and Shorts — plus a caption and 5–8 hashtags to paste. No auto-posting."],
+  ["Captions & posting", "editor", "Captions burnt in, 9:16 for TikTok, Reels and Shorts — plus a caption and 5–8 hashtags to paste. No auto-posting."],
 ];
 
 function HandOff({ go }) {
@@ -205,12 +205,12 @@ export default function Home({ go }) {
         <div className="wrap">
           <div className="split-head reveal">
             <h2 className="h2">A specialist<br />for every stage<br />of your advert</h2>
-            <p className="body-l">Each agent does one job and hands it on. Under the hood: Muse Spark Open plans and critiques, Muse Image 1.0 shoots the stills, SAM 3.1 checks them, open Nigerian TTS speaks, and Wan 2.2 brings each scene to life.</p>
+            <p className="body-l">Each agent does one job and hands it on. Under the hood: AI creative intelligence plans and critiques, photorealistic portrait engines shoot the stills, vision checks verify them, natural West African voices speak, high-fidelity lip sync brings the creator to life and audio QA verifies the words.</p>
           </div>
           <div className="spec-grid">
             {[
               ["Research that knows your buyers", "Pain points, hooks and angles for your category — before a single scene is planned.", "researcher", "Top hook for rcpt: “Customer ask for receipt, I no get. E shame me.”", "10:15 AM"],
-              ["Scripts in your customers' language", "Pidgin, Yoruba, Hausa, Igbo or Nigerian English — then voiced by open Nigerian TTS.", "voice", "Scene 1 voiced in Pidgin. Ready for film.", "10:21 AM"],
+              ["Scripts in your customers' language", "Pidgin, Yoruba, Hausa, Igbo or Nigerian English — spoken with authentic local cadence.", "voice", "Scene 1 voiced in Pidgin. Ready for film.", "10:21 AM"],
               ["Review before you spend", "You approve the storyboard first. The Critic leaves advisory notes on each scene's plan and script.", "critic", "Trim scene 3 — too long for ~5 seconds.", "10:24 AM"],
             ].map(([t, d, k, msg, time], i) => (
               <div className="spec-card reveal" style={{ "--i": i }} key={t}>
@@ -277,7 +277,7 @@ export default function Home({ go }) {
           <button type="button" onClick={() => scrollTo("how")}>How it works</button>
         </div>
       </div>
-      <div className="wrap foot-bottom">© 2026 Talla — AI-generated content, always labelled.</div>
+      <div className="wrap foot-bottom">© 2026 Talla. Built for West African social commerce. All rights reserved.</div>
     </footer>
   </div>);
 }

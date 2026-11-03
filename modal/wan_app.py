@@ -74,7 +74,7 @@ WAN_NEGATIVE = ("worst quality, low quality, blurry, static frame, jitter, disto
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("ffmpeg")
-    .uv_pip_install("torch==2.7.0", "diffusers>=0.35.0", "transformers>=4.51.0",
+    .uv_pip_install("torch==2.7.0", "torchvision==0.22.0", "diffusers>=0.35.0", "transformers>=4.51.0",
                     "accelerate>=1.6.0", "huggingface-hub", "pillow", "numpy", "boto3",
                     "requests", "fastapi[standard]",
                     # ftfy/regex: CLIP text-encoder deps — missing ftfy crashed the
@@ -82,7 +82,9 @@ image = (
                     # opencv (headless): diffusers' export_to_video requires cv2 —
                     # missing cv2 crashed the first otherwise-successful render
                     # at export time (after the full denoise had completed).
-                    "ftfy", "regex", "opencv-python-headless")
+                    "ftfy", "regex", "opencv-python-headless", "av")
+    # torchvision + av: LTX 2.5 needs both (Gemma4VideoProcessor; image-conditioning CRF re-encode) — missing it failed
+    # every B-roll scene of the first parallel demo (2026-11-02).
     # protobuf>=6 (pulled in by the ML stack) removes Enum.ValueType and
     # crash-loops ANY Modal app that mounts volumes (proven on talla-yarngpt,
     # SESSION_COORDINATION 2026-10-29). Pin LAST so it wins the resolve.
@@ -229,7 +231,7 @@ class WanEngine:
 
 
 @app.cls(image=image, volumes={"/weights": weights, "/outputs": outputs}, secrets=[hf_secret],
-         gpu="A100-80GB", timeout=2400, scaledown_window=300, max_containers=1)
+         gpu="H200", timeout=2400, scaledown_window=300, max_containers=3)
 class LTXEngine:
     """LTX 2.5 fallback (silent motion for Talla).
 
@@ -237,7 +239,8 @@ class LTXEngine:
     ``LTX2ImageToVideoPipeline`` (weights cached under /weights). LTX 2.5
     natively generates audio too, but Talla discards it: the local Nigerian
     voice is muxed at stitch so the spoken words stay exactly the script.
-    22B-class model — needs an A100-80GB-class GPU, not a T4.
+    22B-class model + Gemma text encoder: OOMed an A100-80GB on the
+    2026-11-02 demo, so it runs on an H200 (141 GB) with VAE tiling.
     """
 
     @modal.enter()
@@ -252,6 +255,8 @@ class LTXEngine:
             self.pipe = LTX2ImageToVideoPipeline.from_pretrained(
                 LTX_CHECKPOINT, torch_dtype=torch.bfloat16, cache_dir="/weights")
             self.pipe.to("cuda")
+            if hasattr(self.pipe, "vae") and hasattr(self.pipe.vae, "enable_tiling"):
+                self.pipe.vae.enable_tiling()
         except Exception as e:
             self.load_error = f"LTX load failed: {type(e).__name__}: {str(e)[:300]}"
 

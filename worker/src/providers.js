@@ -177,6 +177,53 @@ export async function museImage(env, prompt, { size = "1024x1536" } = {}) {
   return item.b64_json ? `data:image/webp;base64,${item.b64_json}` : item.url;
 }
 
+// Open-model fallback on Modal (talla-image, Z-Image-Turbo) for when Muse is
+// unavailable (2026-11-01: Meta 402 billing). Same return shape as museImage.
+export async function modalImage(env, prompt, { size = "1024x1536", seed } = {}) {
+  if (!env.MODAL_IMAGE_ENDPOINT) throw new Error("MODAL_IMAGE_ENDPOINT not set");
+  const res = await fetch(env.MODAL_IMAGE_ENDPOINT, {
+    method: "POST",
+    headers: modalHeaders(env, { "Content-Type": "application/json" }),
+    body: JSON.stringify({ prompt, size, ...(seed != null ? { seed } : {}) }),
+    signal: AbortSignal.timeout(T.image * 5), // first cold call downloads weights
+  });
+  if (!res.ok) { await failBody("modal-image", res); throw new Error(`Modal image ${res.status}`); }
+  const data = await res.json();
+  if (!data.image_b64) throw new Error("Modal image returned no image");
+  return `data:image/webp;base64,${data.image_b64}`;
+}
+
+// Keyframe QC on Modal (talla-image detect_http, OWLv2 open-vocabulary
+// detection) - replaces Meta SAM 3.1 while the Meta API is blocked. Same
+// {phrase, detections, boxes} shape as samSegment.
+export async function modalDetect(env, imageDataUrl, phrase) {
+  if (!env.MODAL_DETECT_ENDPOINT) throw new Error("MODAL_DETECT_ENDPOINT not set");
+  const res = await fetch(env.MODAL_DETECT_ENDPOINT, {
+    method: "POST",
+    headers: modalHeaders(env, { "Content-Type": "application/json" }),
+    body: JSON.stringify({ image_b64: String(imageDataUrl).split(",").pop(), phrase }),
+    signal: AbortSignal.timeout(T.sam * 3), // cold start loads the detector
+  });
+  if (!res.ok) { await failBody("modal-detect", res); throw new Error(`Modal detect ${res.status}`); }
+  const data = await res.json();
+  return { phrase, detections: Number(data.detections) || 0, boxes: data.boxes || [], raw_len: 0 };
+}
+
+// Spoken-line verify on Modal (talla-asr, Whisper large-v3-turbo) - replaces
+// Meta Muse Voice Transcribe. Same {text, words} shape as museTranscribe.
+export async function modalTranscribe(env, wavB64, { language } = {}) {
+  if (!env.MODAL_ASR_ENDPOINT) throw new Error("MODAL_ASR_ENDPOINT not set");
+  const res = await fetch(env.MODAL_ASR_ENDPOINT, {
+    method: "POST",
+    headers: modalHeaders(env, { "Content-Type": "application/json" }),
+    body: JSON.stringify({ audio_b64: wavB64, ...(language ? { language } : {}) }),
+    signal: AbortSignal.timeout(T.transcribe * 3),
+  });
+  if (!res.ok) { await failBody("modal-asr", res); throw new Error(`Modal ASR ${res.status}`); }
+  const data = await res.json();
+  return { text: data.text || "", words: Array.isArray(data.words) ? data.words : null };
+}
+
 // ---------------------------------------------------------------- Modal ---
 // Every Modal web endpoint is token-gated (contract §4): the Worker sends
 // X-Talla-Token = env.MODAL_ENDPOINT_TOKEN on every call, poll and file read.

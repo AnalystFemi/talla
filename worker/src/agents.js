@@ -32,7 +32,7 @@ function demoStoryboard(format, hooks) {
     { n: 2, purpose: "Pain", shot: "POV demo", key_line: "Show the old frustrating way in 3 seconds", seconds: 5, visual: "Hands struggling with the old option", overlay: null },
     { n: 3, purpose: "Proof", shot: "product demo", key_line: "Show the product solving it, no filter", seconds: 5, visual: "Close-up proof moment, real environment", overlay: { asset: "screen-recording", note: "Real product screen solving it, fullscreen", seconds: 5, style: "fullscreen" } },
     { n: 4, purpose: "Testimonial", shot: "talking-head", key_line: "One honest sentence on why they switched", seconds: 5, visual: "Same creator, relaxed smile, nods", overlay: null },
-    { n: 5, purpose: "CTA", shot: "talking-head + text overlay", key_line: "Tell them exactly what to do next", seconds: 5, visual: "Product centred, CTA text, AI-generated label visible", overlay: null },
+    { n: 5, purpose: "CTA", shot: "talking-head + text overlay", key_line: "Tell them exactly what to do next", seconds: 5, visual: "Product centred, CTA text", overlay: null },
   ];
   if (format !== "confession") return base;
   return [
@@ -41,7 +41,7 @@ function demoStoryboard(format, hooks) {
     { n: 3, purpose: "Switch", shot: "talking-head + product", key_line: "The new workflow in one sentence, product visible", seconds: 5, visual: "Creator holds product up, then back to face", overlay: null },
     { n: 4, purpose: "Proof-stack-1", shot: "product demo", key_line: "Live demo: watch it work, no filter", seconds: 5, visual: "Close-up proof moment, real environment", overlay: { asset: "screen-recording", note: "Real product screen working, fullscreen", seconds: 5, style: "fullscreen" } },
     { n: 5, purpose: "Proof-stack-2", shot: "before/after", key_line: "Before vs after, zoom on the detail", seconds: 5, visual: "Side-by-side comparison, zoom on texture/detail", overlay: { asset: "before-after", note: "Before/after stills, zoom on detail", seconds: 4, style: "pip" } },
-    { n: 6, purpose: "Copy-me-CTA", shot: "talking-head + text overlay", key_line: "Copy me: exact next step in one sentence", seconds: 5, visual: "Product centred, CTA text, AI-generated label visible", overlay: null },
+    { n: 6, purpose: "Copy-me-CTA", shot: "talking-head + text overlay", key_line: "Copy me: exact next step in one sentence", seconds: 5, visual: "Product centred, CTA text", overlay: null },
   ];
 }
 
@@ -135,7 +135,7 @@ export async function scriptAgent(env, project) {
   assertBudget("baseten", "script");
   const formatBrief = format === "confession" ? CONFESSION_BEATS : "Standard UGC: hook, pain, proof, testimonial, CTA. One idea per scene.";
   const out = await basetenChat(env, [
-    { role: "system", content: `You are Talla's Scriptwriter. Write in ${lang} exactly as a Nigerian creator would speak it. Return ONLY JSON {language, lines:[{scene,text,seconds}]}. Short spoken lines, one idea per scene. ${formatBrief} ${ENGINE_CAPS}` },
+    { role: "system", content: `You are Talla's Scriptwriter. Write in ${lang} exactly as a Nigerian creator would speak it. Return ONLY JSON {language, lines:[{scene,text,english,seconds}]} — "english" is a plain English translation of "text" (shown as the subtitle underneath; empty string if text is already English). Short spoken lines, one idea per scene. You may write [pause] inside text for a deliberate beat. ${formatBrief} ${ENGINE_CAPS}` },
     { role: "user", content: `Storyboard: ${JSON.stringify(project.storyboard)}\nResearch: ${JSON.stringify(project.research)}` },
   ]);
   await charge(env, "baseten", "script", project.id);
@@ -157,7 +157,7 @@ export async function exportAgent(env, project, job) {
       caption,
       hashtags: ["#NaijaBusiness", "#SmallBusinessNigeria", "#UGC", "#Nigeria", "#SupportSmallBusiness", "#EntrepreneurNigeria"],
       video_url: job?.final_video_url || null, video_volume_path: job?.final_volume_path || null,
-      checklist: ["Video carries the AI-generated label", "Copy the caption + hashtags", "Post manually on TikTok / Reels / Shorts", "Turn on the platform AI-content label when posting"],
+      checklist: ["Copy the caption + hashtags", "Post manually on TikTok / Reels / Shorts", "Turn on the platform AI-content label when posting"],
       note: "Demo export — connect Baseten for a Muse Spark caption in your language." };
   }
   assertBudget("baseten", "export");
@@ -171,7 +171,7 @@ export async function exportAgent(env, project, job) {
     caption: out.caption || hook,
     hashtags: hashtags.length ? hashtags : ["#NaijaBusiness", "#SmallBusinessNigeria", "#UGC"],
     video_url: job?.final_video_url || null, video_volume_path: job?.final_volume_path || null,
-    checklist: ["Video carries the AI-generated label", "Copy the caption + hashtags", "Post manually on TikTok / Reels / Shorts", "Turn on the platform AI-content label when posting"] };
+    checklist: ["Copy the caption + hashtags", "Post manually on TikTok / Reels / Shorts", "Turn on the platform AI-content label when posting"] };
 }
 
 export const CRITIC_LABEL = "plan/script critic (advisory)";

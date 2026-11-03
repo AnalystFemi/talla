@@ -17,29 +17,40 @@
 export const PERSONAS = [
   {
     id: "female-creator",
-    label: "Female creator (Aisha)",
+    label: "Aisha",
     name: "Aisha",
+    seed: 2007, // Z-Image seed of the approved portrait (web/public/avatars) — keeps the face
     gender: "female",
+    // USER REQUEST 2026-11-01: four NAMED creators (2F/2M); Aisha is made
+    // distinct from Funmi (headscarf, deep brown skin). Same prompt as
+    // scripts/gen_avatars.mjs; portrait pending user approval.
     keyframe_prompt:
-      "Nigerian woman in her late 20s, braids, natural makeup, warm expressive face",
+      "Nigerian Hausa woman in her late 20s, deep rich brown skin, elegant emerald silk headscarf neatly wrapped, small gold stud earrings, natural glam makeup, graceful warm expression, modest cream kaftan top",
     h3_description:
-      "a Nigerian woman in her late 20s with braids, speaking in a warm female voice with a Nigerian accent",
-    yarn_voice: { english: "idera", yoruba: "yoruba_female2", igbo: "igbo_female2", hausa: "hausa_female2" },
+      "Aisha, a Nigerian Hausa woman in her late 20s with an emerald headscarf, speaks in a soft, smooth female voice with a Nigerian accent",
+    // Soft cast: zainab measured bright/sharp, so joke (smoothest English female).
+    voice_anchor: "zainab",
+    voice_ref: "english_zainab.wav",
+    yarn_voice: { english: "zainab", yoruba: "yoruba_female1", igbo: "igbo_female1", hausa: "hausa_female1" },
+    look_default: "Aisha filming a UGC video in a bright modern Abuja apartment, beige sofa and green plants softly blurred behind her, soft daylight, looking directly into the lens, calm warm confident delivery",
   },
   {
     id: "female-creator-2",
     label: "Female creator 2 (Funmi)",
     name: "Funmi",
+    seed: 1421, // Z-Image seed of the approved portrait (web/public/avatars) — keeps the face
     gender: "female",
-    // STATUS: ACCEPTED + LOCKED by user 2026-10-29 (Funmi v4 keyframe).
-    // User direction: LIGHT-SKINNED woman, different style + nicer home.
-    // v3 failed (brown wavy wig read European); v4 = black knotless braids
-    // + West African features — accepted. Do not regenerate without asking.
+    // STATUS: user picked the NEW Z-Image portrait 2026-11-02 (scripts/
+    // gen_avatars.mjs, seed 1421) over the old v4/v5 lock. Complexion leads the
+    // prompt: Z-Image runs guidance 0, so later skin-tone cues are ignored.
     keyframe_prompt:
-      "light-skinned Nigerian Yoruba woman in her late 20s, fair caramel skin, distinctly West African facial features, full lips, long black knotless braids falling over one shoulder, natural glam makeup, glossy lips, small gold hoop earrings, warm confident smile, elegant cream satin blouse",
+      "light-skinned fair complexion, pale golden-beige skin. Funmi, a mixed-race woman of Yoruba Nigerian heritage in her late 20s, light caramel skin, distinctly West African facial features, full lips, long black knotless braids falling over one shoulder, natural glam makeup, glossy lips, small gold hoop earrings, warm confident smile, elegant cream satin blouse, adult woman",
     h3_description:
-      "Funmi, a light-skinned Nigerian Yoruba woman in her late 20s with long black knotless braids, speaks in a clear warm female voice with a Yoruba Nigerian accent",
-    yarn_voice: { english: "idera", yoruba: "yoruba_female2", igbo: "igbo_female2", hausa: "hausa_female2" },
+      "Funmi, a light-skinned Nigerian Yoruba woman in her late 20s with long black knotless braids, speaks in a soft, warm female voice with a Yoruba Nigerian accent",
+    // Cast 2026-11-02 by measured pitch/brightness (data/voice_census): soft, warm, smooth.
+    voice_anchor: "chinenye",
+    voice_ref: "english_chinenye.wav",
+    yarn_voice: { english: "chinenye", yoruba: "yoruba_female2", igbo: "igbo_female2", hausa: "hausa_female1" },
     // UGC Forge: Avatar (who) vs Look (setup). Funmi's LOCKED look — upscale
     // Lagos apartment; the background must sell the lifestyle. This is
     // look_default (read by keyframeForScene); look_yoruba is kept as an
@@ -48,39 +59,43 @@ export const PERSONAS = [
     look_yoruba: "Funmi filming a UGC video in a bright upscale Lagos apartment living room, modern grey sofa with mustard cushions behind her, marble side table with a small vase of flowers, framed abstract wall art, sheer curtains with soft daylight streaming in, a vanity mirror with warm bulbs softly blurred at the side, holding a plain phone at chest height with the back of the phone to camera, looking directly into the lens, calm warm confident delivery",
   },
   {
-    id: "male-creator",
-    label: "Male creator",
-    gender: "male",
-    keyframe_prompt:
-      "Nigerian man in his early 30s, short fade haircut, neat beard, friendly expressive face",
-    h3_description:
-      "a Nigerian man in his early 30s with a short fade haircut, speaking in a clear male voice with a Nigerian accent",
-    yarn_voice: { english: "jude", yoruba: "yoruba_male1", igbo: "igbo_male1", hausa: "hausa_male1" },
-  },
-  {
     // USER REQUEST 2026-10-29: two male avatars — one dark-skinned, one
     // light-skinned. Keyframes pending user approval (UGC Forge gate).
     id: "male-creator-dark",
     label: "Male creator — dark skin (Ebuka)",
     name: "Ebuka",
+    seed: 1007, // Z-Image seed of the approved portrait (web/public/avatars) — keeps the face
     gender: "male",
     keyframe_prompt:
       "dark-skinned Nigerian MAN in his early 30s, deep rich brown skin, masculine face, strong jawline, broad shoulders, athletic build, short fade haircut, neat short beard, confident warm smile, plain fitted crew-neck tee, gold wristwatch, adult male, not female, not feminine",
     h3_description:
-      "Ebuka, a dark-skinned Nigerian man in his early 30s with a short fade and neat beard, speaks in a clear confident male voice with a Nigerian accent",
-    yarn_voice: { english: "jude", yoruba: "yoruba_male1", igbo: "igbo_male1", hausa: "hausa_male1" },
+      "Ebuka, a dark-skinned Nigerian man in his early 30s with a short fade and neat beard, speaks in a lighter, tenor male voice with a Nigerian accent",
+    // Tenor cast: the lighter, higher male voices (user picked osagie 2026-11-02).
+    // yoruba_male1/3 clip ~1 s on 2-3 of 3 test lines (2026-11-02); only
+    // yoruba_male2 is reliable, so Ebuka shares it with Tunde (as for Igbo).
+    voice_anchor: "tayo",
+    voice_ref: "english_tayo.wav",
+    yarn_voice: { english: "tayo", yoruba: "yoruba_male2", igbo: "igbo_male2", hausa: "hausa_male2" },
     look_default: "Ebuka filming a UGC video inside a tidy modern Lagos apartment, plain light-grey wall and a bookshelf softly blurred behind him, bright window daylight from the side, holding a plain phone at chest height with the back of the phone to camera, looking directly into the lens, relaxed confident delivery",
   },
   {
     id: "male-creator-light",
     label: "Male creator — light skin (Tunde)",
     name: "Tunde",
+    seed: 3421, // Z-Image seed of the approved portrait (web/public/avatars) — keeps the face
     gender: "male",
     keyframe_prompt:
-      "light-skinned Nigerian man in his late 20s, fair caramel skin, distinctly West African facial features, short waves haircut, clean-shaven, friendly confident smile, crisp white shirt",
+      // v1 portrait rendered a WOMAN (user caught it 2026-11-01) — male cues
+      // are now explicit, matching scripts/gen_avatars.mjs.
+      "light-skinned fair complexion, pale golden-beige skin. Tunde, a mixed-race MAN of Yoruba Nigerian heritage in his late 20s, light caramel skin, masculine face, defined jawline, short black waves haircut, light stubble beard, friendly confident smile, crisp white open-collar shirt, adult male, not female, not feminine, no braids, no long hair",
     h3_description:
-      "Tunde, a light-skinned Nigerian man in his late 20s with short waves, speaks in a clear warm male voice with a Nigerian accent",
-    yarn_voice: { english: "jude", yoruba: "yoruba_male1", igbo: "igbo_male1", hausa: "hausa_male1" },
+      "Tunde, a light-skinned Nigerian man in his late 20s with short waves, speaks in a deep, low male voice with a Nigerian accent",
+    // igbo_male2 is YarnGPT's only Igbo male voice, so Tunde shares it with
+    // Ebuka for Igbo scripts only; every other language is unique per avatar.
+    // Deep cast: lowest-pitched, darkest voice in each language (user picked umar 2026-11-02).
+    voice_anchor: "umar",
+    voice_ref: "english_umar.wav",
+    yarn_voice: { english: "umar", yoruba: "yoruba_male2", igbo: "igbo_male2", hausa: "hausa_male1" },
     look_default: "Tunde filming a UGC video in a bright modern Lagos apartment, cream sofa and framed wall art softly blurred behind him, soft daylight through sheer curtains, holding a plain phone at chest height with the back of the phone to camera, looking directly into the lens, relaxed friendly delivery",
   },
 ];
@@ -96,8 +111,9 @@ export function getPersona(id) {
 // language ships local-voice (see voiceRoute).
 export const H3_NATIVE_AUDIO_LANGS = new Set(["nigerian-english", "english"]);
 
-// Languages YarnGPT2 serves (Pidgin deliberately absent — MMS serves it).
-export const YARN_LANGS = { "nigerian-english": "english", english: "english", yoruba: "yoruba", igbo: "igbo", hausa: "hausa" };
+// Languages YarnGPT2 serves. Pidgin rides the avatar's English voice:
+// MMS-pcm has one ungendered speaker, which broke the voice-matches-face rule.
+export const YARN_LANGS = { "nigerian-english": "english", english: "english", pidgin: "english", yoruba: "yoruba", igbo: "igbo", hausa: "hausa" };
 
 /**
  * Decide, for one scene, where the spoken track comes from.
@@ -116,15 +132,15 @@ export function voiceRoute(language, persona) {
   if (yarnLang) {
     const voice = persona.yarn_voice[yarnLang];
     if (voice) {
-      return { source: "yarn", voice,
+      return { source: "yarn", voice, lang: yarnLang,
                note: "YarnGPT2 local voice first; stitch muxes it onto the silent Wan/LTX picture." };
     }
     // Guard: persona lacks this language's voice — fall back to its English
     // voice and SAY SO rather than submitting an undefined voice.
-    return { source: "yarn", voice: persona.yarn_voice.english, fallback: "english",
+    return { source: "yarn", voice: persona.yarn_voice.english, lang: "english", fallback: "english",
              warning: `No ${yarnLang} voice mapped for ${persona.label} — falling back to the English voice (${persona.yarn_voice.english}). Pick a creator with a ${yarnLang} voice for a native read.` };
   }
-  // pidgin (and anything unmapped) -> MMS, single fixed speaker.
+  // anything unmapped -> MMS, single fixed speaker.
   return { source: "mms", voice: null,
            warning: "Pidgin voice is MMS single-speaker with no gender choice yet — check it matches the chosen creator; a gendered Pidgin voice (9jaLingo/Wazobia trial) is the planned upgrade." };
 }

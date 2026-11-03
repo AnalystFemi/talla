@@ -1,7 +1,7 @@
 // API helper + client-side storage for the Talla Studio.
 // VITE_API_URL points the production build at the Worker (e.g. https://talla-api.<acct>.workers.dev).
 // Locally it is empty and Vite proxies /api to the Worker on :8787.
-export const API = String(import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+export const API = String(import.meta.env.VITE_API_URL || "https://talla-api.rcpt.workers.dev").replace(/\/+$/, "");
 
 export const OFFLINE_MSG = import.meta.env.DEV
   ? "API offline — start the Worker on localhost:8787"
@@ -50,6 +50,22 @@ export async function api(path, opts = {}) {
   return data;
 }
 
-// Worker media paths (/api/media/file/…, /api/media/r2/…) live on the API origin.
-export const mediaUrl = (u) => (typeof u === "string" && u.startsWith("/api/") ? API + u : u);
-export const isPlayable = (u) => typeof u === "string" && !!u && !u.startsWith("modal-volume://");
+// Worker media paths (/api/media/file/..., /api/media/r2/...) live on the API origin.
+export const mediaUrl = (u) => {
+  if (typeof u !== "string" || !u) return "";
+  if (u.startsWith("/api/")) return API + u;
+  if (u.startsWith("modal-volume://")) {
+    const filename = u.split("/").pop();
+    return `${API}/api/media/file/${filename}`;
+  }
+  return u;
+};
+export const isPlayable = (u) => {
+  if (typeof u !== "string" || !u) return false;
+  if (u.startsWith("http://") || u.startsWith("https://") || u.startsWith("/api/") || u.startsWith("blob:") || u.startsWith("data:")) return true;
+  if (u.startsWith("modal-volume://")) {
+    const ext = u.split(".").pop()?.toLowerCase();
+    return ["mp4", "webm", "wav", "mp3", "jpg", "jpeg", "png", "webp"].includes(ext);
+  }
+  return false;
+};

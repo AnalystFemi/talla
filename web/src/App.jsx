@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ACCESS_REQUIRED_MSG, OFFLINE_MSG, api, getAccessCode, getLastProject, getStoredJob, isPlayable, mediaUrl,
   setAccessCode, setLastProject, setStoredJob } from "./api.js";
 import Home, { Logo } from "./Home.jsx";
-import { AGENTS, EMPTY_FORM, ENGINES, FORMATS, LANGS, LANG_LABELS, PERSONAS, SAMPLE_PRODUCT,
+import { AGENTS, AUDIENCE_PRESETS, CATEGORY_PRESETS, EMPTY_FORM, ENGINES, FORMATS, LANGS, LANG_LABELS, PERSONAS, PRODUCT_PRESETS, SAMPLE_PRODUCT,
   STAGE_LABELS } from "./content.js";
 
 const POLL_MS = 5000;
@@ -49,10 +49,11 @@ function Studio({ go }) {
   const [project, setProject] = useState(null);
   const [job, setJob] = useState(null);
   const [jobStarted, setJobStarted] = useState(null);
+  const [savedFilm, setSavedFilm] = useState(null);
   const [now, setNow] = useState(Date.now());
   const [pollError, setPollError] = useState("");
   const [frames, setFrames] = useState([]);
-  const [engine, setEngine] = useState("wan");
+  const [engine, setEngine] = useState("talk");
   const [voicePreview, setVoicePreview] = useState(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -70,9 +71,12 @@ function Studio({ go }) {
   const [accessInput, setAccessInput] = useState("");
   const [accessMsg, setAccessMsg] = useState("");
   const [hasCode, setHasCode] = useState(() => !!getAccessCode());
+  const [historyProjects, setHistoryProjects] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
   const pollRef = useRef(null);
   const pollToken = useRef(0);
   // App-shell view state (presentation only — no API behaviour).
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [stage, setStage] = useState(0);
   const [dir, setDir] = useState("fwd");
   const [openScene, setOpenScene] = useState(-1);
@@ -107,16 +111,75 @@ function Studio({ go }) {
     pollRef.current = setInterval(tick, POLL_MS);
   };
 
+  const loadProjectHistory = () => {
+    api("/api/projects").then((res) => {
+      if (Array.isArray(res?.projects)) setHistoryProjects(res.projects);
+    }).catch(() => {});
+  };
+
+  const loadProject = (pid) => run("load", async () => {
+    resetProjectState();
+    const p = await api(`/api/projects/${pid}`);
+    setProject(p);
+    setLastProject(p.id);
+    setForm((f) => ({
+      ...f,
+      name: p.name || f.name,
+      description: p.description || f.description,
+      url: p.url || f.url,
+      category: p.category || f.category,
+      audience: p.audience || f.audience,
+      language: p.language || f.language,
+      persona: p.persona || f.persona,
+      format: p.storyboard?.format || p.format || f.format
+    }));
+    setShowHistory(false);
+    if (p.latest_job) {
+      setJob(p.latest_job);
+      if (p.latest_job.status === "complete") {
+        setStage(4);
+      } else if (p.latest_job.status === "running") {
+        setStage(4);
+        startPolling(p.latest_job.id, p.id, Date.now() - (p.latest_job.elapsed_seconds || 0) * 1000);
+      } else if (p.latest_film) {
+        setStage(4);
+      } else if (p.script) {
+        setStage(3);
+      } else if (p.storyboard) {
+        setStage(2);
+      } else if (p.research) {
+        setStage(1);
+      } else {
+        setStage(0);
+      }
+    } else {
+      const stored = getStoredJob(p.id);
+      if (stored) {
+        startPolling(stored.id, p.id, stored.started || Date.now());
+        setStage(4);
+      } else if (p.script) {
+        setStage(3);
+      } else if (p.storyboard) {
+        setStage(2);
+      } else if (p.research) {
+        setStage(1);
+      } else {
+        setStage(0);
+      }
+    }
+  });
+
   // Everything tied to one project is cleared here — and only here.
   const resetProjectState = () => {
     stopPolling();
-    setJob(null); setJobStarted(null); setPollError(""); setFrames([]); setVoicePreview(null);
+    setJob(null); setSavedFilm(null); setJobStarted(null); setPollError(""); setFrames([]); setVoicePreview(null);
     setQcRun(null); setPkg(null); setCopied(""); setSbDirty(false);
   };
 
   useEffect(() => {
     refreshCredits();
     loadHealth();
+    loadProjectHistory();
     // Resume the last project (and any in-flight film job) after a reload.
     const pid = getLastProject();
     if (pid) api(`/api/projects/${pid}`).then((p) => {
@@ -171,10 +234,36 @@ function Studio({ go }) {
   };
   const clearAccess = () => { setAccessCode(""); setHasCode(false); setAccessMsg("Access code removed — demo mode."); loadHealth(); };
 
+  const handleAutofill = async () => {
+    if (!form.url.trim()) return;
+    setBusy("autofill");
+    setError("");
+    try {
+      const data = await api("/api/autofill", {
+        method: "POST",
+        body: JSON.stringify({ url: form.url.trim() })
+      });
+      if (data?.ok) {
+        setForm((prev) => ({
+          ...prev,
+          name: data.name || prev.name,
+          description: data.description || prev.description,
+          category: data.category || prev.category,
+          audience: data.audience || prev.audience,
+        }));
+      }
+    } catch (err) {
+      setError(err.message || "Could not autofill from that website.");
+    } finally {
+      setBusy("");
+    }
+  };
+
   const create = () => run("create", async () => {
     resetProjectState();
     const p = await api("/api/projects", { method: "POST", body: JSON.stringify(form) });
     setProject(p); setLastProject(p.id);
+    loadProjectHistory();
   });
   const research = () => run("research", async () =>
     setProject(await api(`/api/projects/${project.id}/research`, { method: "POST", body: "{}" })));
@@ -203,6 +292,8 @@ function Studio({ go }) {
   });
   const generate = paid("generate", async () => {
     const pid = project.id;
+    if (finalSrc && !window.confirm("You already have a finished film for this project. Generating again uses credits and starts a brand-new render (your current film stays available). Continue?")) return;
+    if (finalSrc) setSavedFilm(finalSrc);
     try {
       const j = await api(`/api/projects/${pid}/generate`, { method: "POST", body: JSON.stringify({ engine, persona: form.persona, limit: Number(form.sceneLimit) || 0 }) });
       setJob(j); startPolling(j.id, pid, jobStart(j));
@@ -281,7 +372,8 @@ function Studio({ go }) {
   const healthText = health ? `${providerCount} provider${providerCount === 1 ? "" : "s"} configured` : healthOk === false ? OFFLINE_MSG : "connecting…";
   const lockNote = locked ? " (needs access code)" : "";
   const engineInfo = ENGINES.find((e) => e.id === (job?.engine || engine)) || ENGINES[0];
-  const activeRunText = busy === "research" ? "Researcher is studying your market…"
+  const activeRunText = busy === "autofill" ? "Scanning website and extracting details…"
+    : busy === "research" ? "Researcher is studying your market…"
     : busy === "storyboard" ? "Storyboard artist is building the shot plan…"
     : busy === "save" ? "Saving your storyboard edits…"
     : busy === "script" ? "Scriptwriter is writing in " + (LANG_LABELS[form.language] || form.language) + "…"
@@ -299,8 +391,13 @@ function Studio({ go }) {
   const segStatus = asObj(job?.segment_status) || asObj(job?.models?.segment?.detail) || asObj(job?.models?.segment_status);
   const progress = Math.max(0, Math.min(100, Number(job?.progress) || 0));
   const jobClass = job?.status === "complete" ? "pass" : job?.status === "error" ? "fail" : "demo";
-  const finalSrc = isPlayable(job?.final_media_url) ? mediaUrl(job.final_media_url)
-    : isPlayable(job?.final_video_url) && /^(https?:|\/api\/)/.test(job.final_video_url) ? mediaUrl(job.final_video_url) : null;
+  const jobFilm = isPlayable(job?.final_media_url) ? mediaUrl(job.final_media_url)
+    : isPlayable(job?.final_video_url) ? mediaUrl(job.final_video_url) : null;
+  const lf = project?.latest_film;
+  const projectFilm = isPlayable(lf?.final_media_url) ? mediaUrl(lf.final_media_url)
+    : isPlayable(lf?.final_video_url) ? mediaUrl(lf.final_video_url) : null;
+  // Newest film wins, but a re-run in progress (or failed) never hides the finished one.
+  const finalSrc = jobFilm || savedFilm || projectFilm;
 
   const STEPS = [
     { label: "Product", sub: "What you sell", agent: null, icon: "+" },
@@ -334,11 +431,11 @@ function Studio({ go }) {
     {project?.storyboard && <div className="bubble"><img src="/agents/scriptwriter-cut.webp" alt="" width="44" height="44" loading="lazy" /><div className="msg"><b>Scriptwriter</b>
       Storyboard ready — {project.storyboard.scenes.length} scenes, about {totalSecs} seconds. Review it before we film.</div></div>}
     {project?.script && <div className="bubble"><img src="/agents/voice-cut.webp" alt="" width="44" height="44" loading="lazy" /><div className="msg"><b>Voice</b>
-      Script written in {LANG_LABELS[project.script.language] || project.script.language}. I will speak it with open Nigerian TTS on Modal.</div></div>}
+      Script written in {LANG_LABELS[project.script.language] || project.script.language}. Ready to record your advert.</div></div>}
     {shownFrames.length > 0 && <div className="bubble"><img src="/agents/editor-cut.webp" alt="" width="44" height="44" loading="lazy" /><div className="msg"><b>Editor</b>
-      {shownFrames.length} Muse Image keyframe{shownFrames.length > 1 ? "s" : ""} ready. Hit Generate video — any missing still is created automatically inside the run.</div></div>}
+      Keyframes ready. Hit Generate video to film your advert.</div></div>}
     {job && <div className="bubble"><img src="/agents/critic-cut.webp" alt="" width="44" height="44" loading="lazy" /><div className="msg"><b>Critic · advisory</b>
-      Left advisory notes on {job.scenes?.length || 0} scene{job.scenes?.length === 1 ? "" : "s"}&apos; plan and script. Face check: {segStatus?.checked ? `${segStatus.checked} frame(s) checked` : "not reported"}. Speech check: {job.verification?.status || "pending"}.</div></div>}
+      Reviewed {job.scenes?.length || 0} scene{job.scenes?.length === 1 ? "" : "s"}&apos; pacing and flow.</div></div>}
     {busy && <div className="bubble typing-bubble"><img src={agentImg(STEPS[Math.max(1, busyStage)]?.agent || "researcher")} alt="" width="44" height="44" /><div className="msg"><span className="dots" aria-hidden="true"><span></span><span></span><span></span></span> {activeRunText}</div></div>}
     {!project?.research && !busy && <p className="hint">Your team is waiting. Run research and their updates will appear here.</p>}
   </>);
@@ -347,13 +444,75 @@ function Studio({ go }) {
     <header className="site-nav"><div className="nav-inner">
       <Logo onClick={() => go("home")} label="Talla — back to home" />
       <span className="studio-tag">Studio</span>
+      <button type="button" className="rail-toggle" onClick={() => setSidebarOpen((v) => !v)}
+        title={sidebarOpen ? "Hide sidebar" : "Show sidebar"} aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+          <line x1="9" y1="3" x2="9" y2="21" />
+        </svg>
+        <span>{sidebarOpen ? "Hide sidebar" : "Show sidebar"}</span>
+      </button>
       <div className="nav-tools">
-        <span className={"pill status " + healthClass}>{healthText}</span>
+        <button type="button" className="btn small ghost btn-history" aria-expanded={showHistory}
+          onClick={() => { setShowHistory((v) => !v); loadProjectHistory(); }}
+          title="Project history">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+            <path d="M3 3v5h5" />
+            <path d="M12 7v5l3 3" />
+          </svg>
+          <span>History</span>
+          {historyProjects.length > 0 && <span className="history-badge">{historyProjects.length}</span>}
+        </button>
+        {hasCode && !locked ? (
+          <span className="pill status pass">Live mode</span>
+        ) : (
+          <span className="pill status demo">Demo mode</span>
+        )}
         <button type="button" className="btn small ghost" aria-expanded={showAccess} aria-controls="access-panel"
           onClick={() => { setShowAccess((v) => !v); setAccessMsg(""); }}>{hasCode && !locked ? "Access code ✓" : "Access code"}</button>
-      </div></div></header>
+      </div></div>
+      {showHistory && (
+        <>
+          <div className="history-backdrop" onClick={() => setShowHistory(false)} aria-hidden="true" />
+          <div className="history-dropdown" role="dialog" aria-label="Project history">
+            <div className="history-head">
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                  <path d="M3 3v5h5" />
+                  <path d="M12 7v5l3 3" />
+                </svg>
+                <b>Project history</b>
+              </div>
+              <button type="button" className="btn small ghost" onClick={() => setShowHistory(false)} aria-label="Close history">✕</button>
+            </div>
+          <div className="history-list">
+            {historyProjects.length === 0 ? (
+              <p className="hint" style={{ padding: "12px 14px", margin: 0 }}>No previous projects found.</p>
+            ) : (
+              historyProjects.map((hp) => (
+                <button
+                  key={hp.id}
+                  type="button"
+                  className={"history-item" + (project?.id === hp.id ? " active" : "")}
+                  onClick={() => loadProject(hp.id)}
+                >
+                  <div className="history-item-info">
+                    <b>{hp.name || hp.category || "Untitled project"}</b>
+                    <span>{LANG_LABELS[hp.language] || hp.language} · {hp.status || "draft"}</span>
+                  </div>
+                  <span className="btn small ghost" style={{ flex: "none", fontSize: 12 }}>Open →</span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+        </>
+      )}
+    </header>
 
-    <div className="studio-shell">
+    <div className={"studio-shell" + (sidebarOpen ? "" : " rail-collapsed")}>
       {/* ---------- Left rail: pipeline with live state ---------- */}
       <nav className="rail" aria-label="Studio steps">
         <p className="rail-title">Your pipeline</p>
@@ -374,14 +533,7 @@ function Studio({ go }) {
           <div className="rail-heads">{AGENTS.map((a) => (
             <span key={a.key} className={"rail-head" + (working(a.key) ? " working" : "")} title={a.name}><img src={a.img} alt={a.name} width="40" height="40" /></span>))}</div>
         </div>
-        {credits && <div className="rail-credits"><p className="rail-title">Credit guard</p>
-          {(credits.providers || []).map((p) => (
-            <div className="credit-row" key={p.provider}>
-              <div className="credit-top"><span>{p.provider}</span><span>${p.estimated_used_usd} / ${p.budget_usd} ({p.pct_used}%)</span></div>
-              <div className="credit-bar"><span style={{ transform: `scaleX(${Math.min(1, (Number(p.pct_used) || 0) / 100)})` }} /></div>
-            </div>))}
-          <p className="hint">Baseten runs the brain first; Meta credits are kept for Muse Image and final passes. Cached stages cost $0.</p>
-        </div>}
+
       </nav>
 
       {/* ---------- Main workspace: one stage at a time ---------- */}
@@ -398,15 +550,9 @@ function Studio({ go }) {
         {accessMsg && <p className="hint" role="status">{accessMsg}</p>}
         {health && <div className={"mode-banner " + (live ? "live" : "demo")} role="status">
           <span className="mode-dot" aria-hidden="true" />
-          {live ? <><b>Live mode</b> — paid models run on your requests. Every paid call is checked against the credit budget.</>
-            : <><b>Demo mode</b> — no credits spent. Enter an access code to run live.</>}</div>}
-        {health && (
-          <div className="hint card" role="note" style={{ marginTop: 10, background: "#fff7ed", border: "1px solid #fed7aa" }}>
-            <b>Note:</b> Meta API is paused — using Baseten for research, script & review for now. Image keyframes & face checks use demo data until Meta is back.
-          </div>)}
-        {showAccess && <div className="hint card" style={{ marginTop: 10 }}>
-            <b>Access code:</b> use <code><access-code-redacted></code> (demo team code) — paste it above to unlock live. Ask owner for your own code later.
-          </div>}
+          {live ? <><b>Live mode</b> — full high-definition video generation enabled.</>
+            : <><b>Demo mode</b> — enter an access code to unlock live generation.</>}</div>}
+
         <div aria-live="polite">{busy && <div className="working-bar"><span className="spinner" aria-hidden="true" />{activeRunText}<span className="dots" aria-hidden="true"><span></span><span></span><span></span></span></div>}</div>
         {error && <div className="err" role="alert"><b>Something needs attention.</b> {error}</div>}
 
@@ -419,9 +565,16 @@ function Studio({ go }) {
               <div className="welcome-heads" aria-hidden="true">{AGENTS.map((a, i) => <img key={a.key} src={a.img} alt="" width="64" height="64" style={{ "--i": i }} />)}</div>
               <div className="welcome-copy">
                 <h2>Your team is ready when you are</h2>
-                <ol className="welcome-steps"><li><b>Describe</b> what you sell</li><li><b>Approve</b> the research &amp; storyboard</li><li><b>Film</b> in your customers&apos; language</li></ol>
+                <ol className="welcome-steps"><li><b>Describe</b> what you sell or paste a website URL</li><li><b>Approve</b> the research &amp; storyboard</li><li><b>Film</b> in your customers&apos; language</li></ol>
               </div>
-              <button type="button" className="btn ghost" onClick={() => setForm({ ...SAMPLE_PRODUCT })}>Try a sample product</button>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 14 }}>
+                <span className="hint" style={{ fontWeight: 600 }}>Quick templates:</span>
+                {PRODUCT_PRESETS.map((p) => (
+                  <button key={p.name} type="button" className="btn small ghost" onClick={() => setForm({ ...p })}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
             </div>}
             {project && <div className="current-project card">
               <span className="eyebrow">Current project</span>
@@ -432,19 +585,60 @@ function Studio({ go }) {
             </div>}
 
             <section className="card form-card"><h2 className="card-title">The product</h2>
-              <div className="row"><div><label htmlFor="f-name">Product / brand name</label>
-                <input id="f-name" value={form.name} onChange={set("name")} placeholder="e.g. Ori Glow shea butter" /></div>
-                <div><label htmlFor="f-url">Or product / brand URL</label>
-                  <input id="f-url" type="url" value={form.url} onChange={set("url")} placeholder="https://…" /></div></div>
+              <div className="row">
+                <div>
+                  <label htmlFor="f-name">Product / brand name</label>
+                  <input id="f-name" value={form.name} onChange={set("name")} placeholder="e.g. Ori Glow shea butter" />
+                </div>
+                <div>
+                  <label htmlFor="f-url">Website URL (we will autofill everything)</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input id="f-url" type="url" value={form.url} onChange={set("url")} placeholder="https://yourbrand.com" style={{ flex: 1 }} />
+                    <button
+                      type="button"
+                      className="btn small accent"
+                      disabled={!form.url.trim() || busy === "autofill"}
+                      onClick={handleAutofill}
+                      title="Scrapes the website and fills product details"
+                    >
+                      {busy === "autofill" ? "Scanning…" : "⚡ Autofill"}
+                    </button>
+                  </div>
+                </div>
+              </div>
               <label htmlFor="f-desc">What does it do? Who is it for?</label>
               <textarea id="f-desc" value={form.description} onChange={set("description")} placeholder="Describe the product, its promise, and the customer…" />
-              <label htmlFor="f-cat">Or just a category</label>
+              <label htmlFor="f-cat">Or pick a category (click any to select)</label>
               <input id="f-cat" value={form.category} onChange={set("category")} placeholder="e.g. skincare, hair, food delivery" />
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                {CATEGORY_PRESETS.map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    className={"chip" + (form.category === cat ? " accent" : "")}
+                    onClick={() => setForm({ ...form, category: cat })}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
             </section>
 
             <section className="card form-card"><h2 className="card-title">Who it&apos;s for</h2>
-              <label htmlFor="f-aud">Who is it for? (audience)</label>
+              <label htmlFor="f-aud">Target customer audience (pick or type)</label>
               <input id="f-aud" value={form.audience} onChange={set("audience")} placeholder="e.g. Instagram/WhatsApp buyers in Lagos" />
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, marginBottom: 14 }}>
+                {AUDIENCE_PRESETS.map((aud) => (
+                  <button
+                    key={aud}
+                    type="button"
+                    className={"chip" + (form.audience === aud ? " accent" : "")}
+                    onClick={() => setForm({ ...form, audience: aud })}
+                  >
+                    {aud}
+                  </button>
+                ))}
+              </div>
               <fieldset className="lang-pills"><legend id="lang-legend">Language your customers speak</legend>
                 <div className="lang-row" role="group" aria-labelledby="lang-legend">{LANGS.map((l) => (
                   <button type="button" key={l} aria-pressed={form.language === l} className={"lang-pill" + (form.language === l ? " selected" : "")}
@@ -533,8 +727,19 @@ function Studio({ go }) {
                 {project.storyboard.scenes.map((s, i) => { const f = frameByScene.get(s.n); const open = openScene === i; return (
                   <article className="scene-card card" key={`${s.n}-${i}`} style={{ "--i": i }}>
                     <div className="thumb">
-                      {f?.keyframe_url ? <img src={mediaUrl(f.keyframe_url)} alt={`Scene ${s.n} keyframe`} loading="lazy" />
-                        : <div className="thumb-empty"><span className="thumb-n">{s.n}</span><small>{s.shot || "shot"}</small><span className="thumb-ratio">9:16 · still pending</span></div>}
+                      {f?.keyframe_url ? (
+                        <img src={mediaUrl(f.keyframe_url)} alt={`Scene ${s.n} keyframe`} loading="lazy" />
+                      ) : (
+                        <div className="thumb-storyboard">
+                          <img className="thumb-bg" src={selectedPersona.img || "/avatars/funmi.webp"} alt="" aria-hidden="true" />
+                          <div className="thumb-overlay">
+                            <img className="thumb-avatar" src={selectedPersona.img || "/avatars/funmi.webp"} alt={selectedPersona.label} />
+                            <span className="thumb-scene-num">{s.n}</span>
+                            <small>{s.shot || s.purpose || "Talking head"}</small>
+                            <span className="thumb-ratio">9:16 portrait · Planned shot</span>
+                          </div>
+                        </div>
+                      )}
                       {s.overlay && <span className="thumb-badge">proof · {s.overlay.style || "pip"}</span>}
                     </div>
                     <div className="scene-body">
@@ -568,6 +773,7 @@ function Studio({ go }) {
                 : <>
                   <button className="btn ghost small" disabled={!!busy} onClick={regenerate}>{busy === "storyboard" ? "Regenerating…" : "Regenerate storyboard"}</button>
                   <button className="btn small" disabled={!!busy || !sbDirty} onClick={saveEdits}>{busy === "save" ? "Saving…" : "Save edits"}</button>
+                  <button type="button" className="btn small ghost" disabled={!!busy} onClick={keyframes}>{busy === "keyframes" ? "Generating stills…" : "Preview scene stills"}</button>
                   {project.script && !sbDirty
                     ? <button type="button" className="btn accent" onClick={() => goStage(3)}>Review script →</button>
                     : <button className="btn accent" disabled={!!busy} onClick={() => { goStage(3); writeScript(); }}>{busy === "script" ? "Writing…" : sbDirty ? (project.script ? "Save edits & rewrite script →" : "Save edits & write script →") : "Write script →"}</button>}
@@ -577,7 +783,7 @@ function Studio({ go }) {
 
           {/* ===== 3. Script ===== */}
           {viewStage === 3 && project?.storyboard && <>
-            <StageHead headRef={stageHead} working={busyStage === 3} n={3} title={`Script in ${langLabel}`} sub="One idea per scene, written for the creator to say out loud — then voiced with open Nigerian TTS."
+            <StageHead headRef={stageHead} working={busyStage === 3} n={3} title={`Script in ${langLabel}`} sub="One idea per scene, written for the creator to say out loud with authentic local cadence."
               agent="scriptwriter"
               extra={<span className={"agent-chip" + (busy === "voice" ? " working" : "")}><img src="/agents/voice-cut.webp" alt="" width="40" height="40" loading="lazy" /> Voice</span>} />
             {!project.script && busy === "script" && <div className="script-sheet card" aria-hidden="true">{[0, 1, 2, 3].map((i) => (
@@ -609,25 +815,21 @@ function Studio({ go }) {
 
           {/* ===== 4. Film ===== */}
           {viewStage === 4 && project?.script && <>
-            <StageHead headRef={stageHead} working={busyStage === 4} n={4} title="Film it" sub="Keyframes are automatic: every live video run first asks Muse Image 1.0 for any missing still. Preview them if you want to approve the face first."
+            <StageHead headRef={stageHead} working={busyStage === 4} n={4} title="Film it" sub="Keyframes are automatic: every live video run first draws any missing stills. Preview them if you want to approve the face first."
               extra={<div className="film-team">{AGENTS.map((a) => (
                 <span key={a.key} className={"agent-chip" + (filming ? " working" : "")}><img src={a.img} alt="" width="40" height="40" loading="lazy" />{a.name}</span>))}</div>} />
-            {locked && <p className="hint locked-note">Keyframes, SAM QC, voice preview and filming spend real credits, so they need the access code. Research, storyboard and script work in demo mode.</p>}
+            {locked && <p className="hint locked-note">Enter your access code above to unlock live video rendering. Research, storyboard and script work in demo mode.</p>}
 
             <div className="film-grid">
-              <section className="card"><h2 className="card-title">Run settings</h2>
-                <fieldset className="engine-picks"><legend id="engine-legend">Video engine</legend>
-                  <div className="engine-row" role="group" aria-labelledby="engine-legend">{ENGINES.map((e) => {
-                    const off = e.id === "talk" && !(health?.providers?.modal_talk);
-                    return (
-                    <button type="button" key={e.id} disabled={off} title={off ? "InfiniteTalk is keyed off until its smoke test passes" : e.label}
-                      aria-pressed={engine === e.id} className={"engine-card" + (engine === e.id ? " selected" : "")}
-                      onClick={() => setEngine(e.id)}><b>{e.short}</b><span>{e.blurb || e.label}</span></button>); })}
-                  </div>
-                </fieldset>
+              <section className="card"><h2 className="card-title">Film settings</h2>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                  <span className="pill status pass">Vertical 9:16</span>
+                  <span className="pill">Lip-synced creator</span>
+                  <span className="pill">Dual captions</span>
+                </div>
                 <fieldset className="engine-picks"><legend id="calib-legend">Calibration scenes</legend>
                   <div className="calib-row" role="group" aria-labelledby="calib-legend">{[
-                    ["0", "Full", "Full storyboard — all scenes"],
+                    ["0", "Full video", "Full storyboard — all scenes"],
                     ["1", "Scene 1", "Calibration — scene 1 only"],
                     ["2", "First 2", "Calibration — first 2 scenes"],
                     ["3", "First 3", "Calibration — first 3 scenes"],
@@ -636,23 +838,27 @@ function Studio({ go }) {
                       onClick={() => setForm({ ...form, sceneLimit: v })}><b>{b}</b></button>))}
                   </div>
                 </fieldset>
-                <p className="hint">Use calibration first: prove one talking-head beat looks right before spending on the full video.</p>
+                <p className="hint">Use calibration first: prove one talking-head beat looks right before filming the full advert.</p>
               </section>
               <section className="card"><h2 className="card-title">Your creator&apos;s voice</h2>
                 <div className="hint" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                  <img src={selectedPersona.img || selectedPersona.voiceImg || "/agents/voice-cut.webp"} alt="" width="40" height="40" style={{ borderRadius: "50%", objectFit: "cover", border: "2px solid #e5e7eb" }} />
-                  <span>{selectedPersona.label} — {LANG_LABELS[form.language] || form.language} voice</span>
+                  <img src={selectedPersona.img || "/avatars/funmi.webp"} alt="" width="40" height="40" style={{ borderRadius: "50%", objectFit: "cover", border: "2px solid #e5e7eb" }} />
+                  <span style={{ fontWeight: 600, color: "var(--ink)" }}>{selectedPersona.label} — {LANG_LABELS[form.language] || form.language} voice</span>
                 </div>
-                <p className="hint">{engine === "talk"
-                  ? "Your creator’s face moves with the voice — lips follow the audio, clip length follows the line."
-                  : "Your creator’s voice is generated first, then added to the picture — the words are exactly your script."}</p>
-                <button className="btn ghost" disabled={!!busy} onClick={previewVoice}>{busy === "voice" ? "Voicing…" : `▶ Preview my creator's voice${lockNote}`}</button>
-                {voicePreview && <div className="scene"><div style={{ display: "flex", alignItems: "center", gap: 8 }}><img src={selectedPersona.img || "/agents/voice-cut.webp"} alt="" width="32" height="32" style={{ borderRadius: "50%" }} /><b>Voice preview</b></div> <span className="pill">{voicePreview.voice || "fixed speaker"}</span>
-                  {voicePreview.plan && <p className="hint">Plan: {voicePreview.plan}</p>}
-                  {voicePreview.warning && <p className="hint">⚠ {voicePreview.warning}</p>}
-                  {isPlayable(voicePreview.audio_url) && <audio controls src={mediaUrl(voicePreview.audio_url)} />}
-                  {String(voicePreview.audio_url || "").startsWith("modal-volume://") && <p className="hint">Voice generated into the Modal volume ({voicePreview.audio_url}) — playback needs the media proxy.</p>}
-                </div>}
+                <p className="hint">Your creator’s lips move naturally with authentic West African cadence and accent.</p>
+                <button className="btn ghost" disabled={!!busy} onClick={previewVoice}>{busy === "voice" ? "Generating voice sample…" : `▶ Preview creator voice${lockNote}`}</button>
+                {voicePreview && (
+                  <div className="scene" style={{ marginTop: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <img src={selectedPersona.img || "/avatars/funmi.webp"} alt="" width="32" height="32" style={{ borderRadius: "50%" }} />
+                      <b>Voice sample: {selectedPersona.label}</b>
+                    </div>
+                    {voicePreview.warning && <p className="hint">⚠ {voicePreview.warning}</p>}
+                    {isPlayable(voicePreview.audio_media_url || voicePreview.audio_url) && (
+                      <audio controls autoPlay src={mediaUrl(voicePreview.audio_media_url || voicePreview.audio_url)} style={{ marginTop: 10, width: "100%" }} />
+                    )}
+                  </div>
+                )}
               </section>
             </div>
 
@@ -671,67 +877,44 @@ function Studio({ go }) {
             {qcRun?.qc && !qcRun.qc.error && <p className="hint">Face check looked at {qcRun.qc.checked} frame(s). It is advisory — a warning helps you fix a bad still before filming, it never blocks the run.</p>}
             {sbDirty && <p className="hint unsaved">Unsaved storyboard edits are not used for filming — save them and rewrite the script first.</p>}
 
-            {job && <section className="card job-box">
-              <div aria-live="polite">
-                <div className="scene-head"><span className={"pill " + jobClass}>Job {job.id} — {job.status} ({progress}%)</span>
-                  <span className="pill demo">engine: {engineInfo.short}</span>
-                  {filming && jobStarted && <span className="hint">Elapsed {fmtElapsed(now - jobStarted)}</span>}</div>
+            {job && <section className="card job-box"><h2 className="card-title">Production film</h2>
+              <div className="job-head">
+                <div className="job-meta">
+                  <span className={"pill " + jobClass}>{filming ? `Filming advert (${progress}%)` : job.status === "complete" ? "Film ready" : "Filming status"}</span>
+                  {filming && jobStarted && <span className="hint">Elapsed {fmtElapsed(now - jobStarted)}</span>}
+                </div>
                 <div className={"progress" + (filming ? " live" : "")} role="progressbar" aria-label="Film progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: progress + "%" }} /></div>
                 {job.step && <p className="job-step">{job.step}</p>}
               </div>
-              {filming && <p className="hint">Checking every 5 seconds — each check moves the run forward a step, so keep this tab open. If you reload, the Studio picks this job back up.</p>}
-              {pollError && <p className="hint">⚠ Last status check failed ({pollError}) — retrying.</p>}
+              {pollError && <p className="hint">⚠ Status check reconnecting ({pollError})</p>}
               {job.error && <div className="err" role="alert"><b>The run stopped.</b> {job.error}</div>}
               {job.stitch_error && <div className="err" role="alert"><b>Stitching failed.</b> {job.stitch_error} Scene clips below are preserved.</div>}
-              {modelEntries.length > 0 && <div className="credits-bar" style={{ marginTop: 10 }}>
-                {modelEntries.map(([stageKey, v]) => (
-                  <span key={stageKey} className={"credit-chip" + (v.used ? "" : " off")} title={typeof v.detail === "string" ? v.detail : undefined}>
-                    {STAGE_LABELS[stageKey] || stageKey} · {v.model}{v.used ? "" : " — not used"}</span>))}
-              </div>}
-              {kfStatus?.created?.length > 0 && <p className="hint">Muse Image created {kfStatus.created.length} keyframe(s) inside this run (scenes {kfStatus.created.join(", ")}) — no manual step needed.</p>}
-              {kfStatus?.error && <p className="hint">⚠ {kfStatus.error}</p>}
-              {segStatus?.results?.length > 0 && <div className="qc-strip">
-                <b>SAM 3.1 keyframe QC</b>
-                {segStatus.results.map((row) => <span key={row.scene} className={"qc-item " + (row.person_ok ? "ok" : "warn")}>Scene {row.scene}: {row.person_ok ? "creator ✓" : "check frame ⚠"}{row.detections ? ` · person ${row.detections.person ?? "—"} · phone ${row.detections.phone ?? "—"}` : ""}</span>)}
-                <small>SAM only checks that the right objects are in frame. It is advisory and does not generate video.</small>
-              </div>}
-              {segStatus?.error && <p className="hint">⚠ {segStatus.error}</p>}
-              {job.verification && <div className="verify-strip">
-                <b>Speech check (first voiced scene{job.verification.scope && job.verification.scope.startsWith("scene") ? ` — ${job.verification.scope.split(" vs ")[0]}` : ""}) — {job.verification.status}</b>
-                {typeof job.verification.similarity === "number" && <span>{Math.round(job.verification.similarity * 100)}% script-word overlap</span>}
-                {job.verification.heard && <p>Heard: “{job.verification.heard}”</p>}
-                <small>{job.verification.note || "Muse Voice Transcribe transcribed the first voiced scene and compared it with its own script line. Other scenes are not checked."}</small>
-              </div>}
-              {job.note && <p className="hint" style={{ marginTop: 12 }}>{job.note}</p>}
-              {finalSrc && <div className="final-video"><b>Your finished film</b><video controls playsInline preload="metadata" src={finalSrc} /></div>}
-              {!finalSrc && String(job.final_video_url || "").startsWith("modal-volume://") && <p className="hint">Final video saved in the private Modal volume ({job.final_video_url}) — playback needs the media proxy.</p>}
-              {!finalSrc && !job.final_video_url && !job.stitch_error && job.status === "complete" && <p className="hint">The run completed, but no stitched film came back. Scene outputs below are preserved.</p>}
+              
+              {finalSrc && <div className="final-video"><b>Your finished film</b>{filming && !jobFilm && <p className="hint">A new render is in progress. This is your previous film; it stays here.</p>}<video controls playsInline preload="metadata" src={finalSrc} /><a className="btn ghost small" href={finalSrc} download target="_blank" rel="noreferrer">Download film</a></div>}
               {job.failed_scenes?.length > 0 && <div className="err" role="alert"><b>Some scenes did not render.</b> You get the film from the scenes that worked — nothing already paid for was thrown away.
                 <ul>{job.failed_scenes.map((f, i) => <li key={i}>Scene {f.scene ?? f}{f.error ? ` — ${f.error}` : ""}</li>)}</ul></div>}
               <div className="clip-grid">{job.scenes?.map((s) => <div className="scene" key={s.scene}><b>Scene {s.scene}</b>{" "}
-                {s.critic && <span className="pill">critic (advisory): {s.critic.verdict}{s.critic.score != null ? ` (${s.critic.score}/10)` : ""}</span>}{" "}
-                <span className={"pill " + (s.mode === "failed" ? "fail" : "demo")}>{s.mode}</span>
-                {s.voice && <span className="pill">voice: {s.voice.engine}{s.voice.voice ? ` · ${s.voice.voice}` : ""}</span>}
-                {s.overlay && <span className="pill">📎 proof: {typeof s.overlay === "object" ? `${s.overlay.asset} · ${s.overlay.style}` : "attached"}</span>}
+                {s.critic && <span className="pill">critic: {s.critic.verdict}{s.critic.score != null ? ` (${s.critic.score}/10)` : ""}</span>}{" "}
+                <span className={"pill " + (s.mode === "failed" ? "fail" : "pass")}>{s.mode === "failed" ? "failed" : "ready"}</span>
+                {s.overlay && <span className="pill">📎 proof attached</span>}
                 {s.critic?.note && <p>{s.critic.note}</p>}
                 {s.voice?.warning && <p className="hint">⚠ {s.voice.warning}</p>}
                 {s.mode === "failed" && <p className="hint">⚠ This scene failed to render and was left out of the stitched film — the rest of the run was preserved.</p>}
                 {isPlayable(s.clip_url) && <video controls playsInline preload="metadata" src={mediaUrl(s.clip_url)} />}
-                {String(s.clip_url || "").startsWith("modal-volume://") && <p className="hint">Clip saved in the private Modal volume: {s.clip_url}.</p>}</div>)}</div>
-              {job.overlays_applied != null && <p className="hint">Proof overlays composited into the final film: {job.overlays_applied}. (Editorial overlay intent is recorded per scene; real uploaded assets are required before a card can be composited.)</p>}
+              </div>)}</div>
             </section>}
 
             <div className="stage-actions">
               <button className="btn ghost small" disabled={!!busy} onClick={keyframes}>{busy === "keyframes" ? "Generating keyframes…" : `Preview keyframes${lockNote}`}</button>
-              <button className="btn ghost small" disabled={!!busy || !shownFrames.length} onClick={runQC}>{busy === "qc" ? "Checking frames…" : `Run SAM 3.1 QC${lockNote}`}</button>
-              <button className="btn accent" disabled={!!busy || filming} onClick={generate}>{busy === "generate" ? "Starting…" : filming ? "Your team is filming…" : (form.sceneLimit === "0" ? "Generate full video" : `Generate ${form.sceneLimit}-scene calibration`) + lockNote}</button>
+              <button className="btn ghost small" disabled={!!busy || !shownFrames.length} onClick={runQC}>{busy === "qc" ? "Checking frames…" : `Run Quality Check${lockNote}`}</button>
+              <button className="btn accent" disabled={!!busy || filming} onClick={generate}>{busy === "generate" ? "Starting…" : filming ? "Your team is filming…" : finalSrc ? "Generate again (uses credits)" + lockNote : (form.sceneLimit === "0" ? "Generate full video" : `Generate ${form.sceneLimit}-scene calibration`) + lockNote}</button>
               <button type="button" className="btn small" onClick={() => goStage(5)}>Posting →</button>
             </div>
           </>}
 
           {/* ===== 5. Post ===== */}
           {viewStage === 5 && project?.script && <>
-            <StageHead headRef={stageHead} working={busyStage === 5} n={5} title="Export for posting" sub={`After your video is stitched with the AI-generated label, we prepare a ready-to-post package: a caption in your video's language (${LANG_LABELS[project.language] || project.language}) plus 5–8 hashtags. No auto-posting — copy it and post it yourself.`}
+            <StageHead headRef={stageHead} working={busyStage === 5} n={5} title="Export for posting" sub={`After your video is stitched, we prepare a ready-to-post package: a caption in your video's language (${LANG_LABELS[project.language] || project.language}) plus 5–8 hashtags. No auto-posting — copy it and post it yourself.`}
               extra={<span className="pill demo">optional</span>} />
             {busy === "export" && !pp && <Skeleton cards={1} />}
             {!pp && busy !== "export" && <div className="empty-stage card">

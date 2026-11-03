@@ -27,6 +27,9 @@ export const COSTS_USD = {
   "modal:talk_clip": 0.60, // measured 2026-10-31: 483.6 s H100 for 5.027 s Yoruba (talk_1793438660_4b7b7552.mp4)
   "modal:tts_scene": 0.03, // estimate, uncalibrated
   "modal:stitch": 0.03, // estimate, uncalibrated
+  "modal:image": 0.01, // Z-Image-Turbo L40S ~8 s warm (Meta Muse Image replacement)
+  "modal:detect": 0.002, // OWLv2 CPU keyframe QC (Meta SAM replacement)
+  "modal:asr": 0.005, // Whisper turbo L4 verify (Meta Transcribe replacement)
   "firecrawl:scrape": 0.005, "exa:search": 0.005,
 };
 

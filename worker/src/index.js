@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { researchAgent, storyboardAgent, scriptAgent, criticAgent, exportAgent, LANGUAGES, SCRIPT_FORMATS, CRITIC_LABEL } from "./agents.js";
 import { creditSummary, charge, cacheGet, cacheSet, cacheKey, contentHash, assertBudget, assertBudgetUsd, estimateCost, refreshTotals } from "./credits.js";
-import { has, modalCall, modalPollOnce, modalCancel, modalFile, museImage, museTranscribe, samSegment, bytesToBase64, base64ToBytes, VOICE_TIMEOUT_MS } from "./providers.js";
+import { has, modalCall, modalPollOnce, modalCancel, modalFile, modalImage, modalDetect, modalTranscribe, museImage, museTranscribe, samSegment, bytesToBase64, base64ToBytes, VOICE_TIMEOUT_MS } from "./providers.js";
 import { PERSONAS, DEFAULT_PERSONA_ID, getPersona, voiceRoute } from "./personas.js";
 
 const app = new Hono();
@@ -42,11 +42,16 @@ function demoEnv(env) {
 }
 
 const DEV_ORIGINS = ["http://localhost:5173"];
-const allowedOrigins = (env) => [...DEV_ORIGINS,
-  ...String(env?.ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean)];
+const isAllowedOrigin = (origin, env) => {
+  if (!origin) return false;
+  if (DEV_ORIGINS.includes(origin)) return true;
+  if (origin.endsWith(".pages.dev") || origin === "https://usetalla.pages.dev") return true;
+  const list = String(env?.ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return list.includes(origin);
+};
 
 app.use("*", cors({
-  origin: (origin, c) => (allowedOrigins(c.env).includes(origin) ? origin : null),
+  origin: (origin, c) => (isAllowedOrigin(origin, c.env) ? origin : null),
   allowHeaders: ["Content-Type", "X-Talla-Access", "Range"],
   allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
   exposeHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
@@ -173,6 +178,16 @@ async function latestJob(env, pid) {
   return [...mem.jobs.values()].filter((j) => j.project_id === pid).pop() || null;
 }
 
+// Newest job that actually produced a finished film, so a later (re)run that
+// is still rendering or failed never hides a film the owner already paid for.
+async function latestFinishedJob(env, pid) {
+  if (env?.DB) { try {
+    const row = await env.DB.prepare("SELECT data FROM jobs WHERE project_id=?1 AND COALESCE(json_extract(data,'$.final_media_url'), json_extract(data,'$.final_video_url'), '') != '' ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(pid).first();
+    if (row?.data) return JSON.parse(row.data);
+  } catch (e) { console.error("[d1] latestFinishedJob failed:", e?.message || e); } }
+  return [...mem.jobs.values()].filter((j) => j.project_id === pid && j.final_media_url).pop() || null;
+}
+
 // Job lock (contract §3): at most one step runs per job at a time, across
 // isolates, so concurrent client polls can never double-spawn a paid GPU
 // call. The lock outlives the longest single step (voice 180 s + slack).
@@ -248,6 +263,38 @@ async function frameDataUrl(env, f) {
   return null;
 }
 const frameFor = (p, n) => (p.keyframes || []).find((f) => f.scene === n && (f.keyframe_key || f.keyframe_url));
+// Talk films are one creator talking to camera: every scene animates the SAME
+// still (the first scene's that exists), so the face never changes between
+// cuts. Silent engines keep one still per scene.
+const sceneFrame = (p, st, engine, n) => engine === "talk"
+  ? st.plan.map((x) => frameFor(p, x.n)).find(Boolean)
+  : frameFor(p, n);
+// Talk films mix in faceless LTX B-roll (user 2026-11-02: cut render time and
+// cost). B-roll stills are stored under scene 1000+n so they never replace
+// the creator's face still for that scene.
+const BROLL_KEY = (n) => 1000 + n;
+const isBroll = (job, s) => job.engine === "talk" && s.engine === "ltx";
+const frameForScene = (p, st, job, s) => isBroll(job, s) ? frameFor(p, BROLL_KEY(s.n)) : sceneFrame(p, st, job.engine, s.n);
+const CLIP_OP = { ltx: "ltx_clip", talk: "talk_clip", wan: "wan_clip" };
+const BROLL_RE = /proof|demo|product|result|before|after|feature|show|close-?up|b-?roll/i;
+
+// Which scenes of a talk film become B-roll: never the hook (first) or the
+// CTA (last); proof/demo-type scenes first, then alternate middles; at most
+// half the film, so the creator still carries it.
+// 2026-11-03: generated B-roll is OFF (LTX hallucinated product screens and
+// objects). Studio films are talking-head only; flip to true to re-enable.
+const BROLL_ENABLED = false;
+function sceneEngines(plan, engine) {
+  const out = plan.map(() => engine);
+  if (!BROLL_ENABLED || engine !== "talk" || plan.length < 3) return out;
+  const max = Math.floor(plan.length / 2);
+  let n = 0;
+  const pick = (i) => { if (n < max && i > 0 && i < plan.length - 1 && out[i] === "talk") { out[i] = "ltx"; n++; } };
+  plan.forEach((x, i) => { if (x.broll === true || BROLL_RE.test(`${x.purpose || ""} ${x.shot || ""}`)) pick(i); });
+  for (let i = 2; i < plan.length - 1; i += 2) pick(i);
+  for (let i = 1; i < plan.length - 1; i += 2) pick(i);
+  return out;
+}
 
 app.get("/api/media/file/:name", async (c) => {
   // Public read (names are collision-safe <prefix>_<unix>_<8hex>), but the
@@ -301,14 +348,14 @@ export const MODEL_MAP = {
   research: "Muse Spark Open (Baseten)",
   storyboard: "Muse Spark Open (Baseten)",
   script: "Muse Spark Open (Baseten)",
-  keyframe: "Muse Image 1.0 (Meta)",
+  keyframe: "Z-Image-Turbo (Modal, open) — Muse Image 1.0 when Meta billing returns",
   voice: "YarnGPT2 / MMS (Modal, open)",
   video: { h3: "MiniMax H3 (Modal H200, ON HOLD)", wan: "Wan 2.2 (Modal, silent fallback)", ltx: "LTX 2.5 (Modal, gated fallback)", talk: "InfiniteTalk (Modal, lip-synced primary)" },
   critic: `Muse Spark Open (Baseten) — ${CRITIC_LABEL}`,
   stitch: "ffmpeg composite (Modal)",
   export: "Muse Spark Open (Baseten)",
-  verify: "Muse Voice Transcribe 1.0 (Meta, verify stage — honest: 404, shows deferred)",
-  segment: "SAM 3.1 (Meta, keyframe QC)",
+  verify: "MMS-1b-all (Meta, open, Modal) for Yoruba/Hausa/Igbo + Whisper turbo for English/Pidgin",
+  segment: "OWLv2 detector (Modal, keyframe QC) — SAM 3.1 when Meta returns",
 };
 const ENGINE_LABEL = { wan: "Wan 2.2", ltx: "LTX 2.5", talk: "InfiniteTalk" };
 // Engine duration caps (owner decision 2026-10-30): Wan 720x1280 @16 fps,
@@ -320,6 +367,12 @@ const ENGINE_CAP_S = { wan: 5.0, ltx: 10.6, talk: 40.0 };
 function liveMode(env) {
   return has(env, "BASETEN_API_KEY") || has(env, "META_API_KEY") || has(env, "MODAL_WAN_ENDPOINT") || has(env, "MODAL_TALK_ENDPOINT");
 }
+// Meta API blocked 2026-11-01 (402 billing): each Meta stage has an open
+// Modal replacement, preferred whenever its endpoint is configured.
+const imagesReady = (env) => has(env, "MODAL_IMAGE_ENDPOINT") || has(env, "META_API_KEY");
+const qcReady = (env) => has(env, "MODAL_DETECT_ENDPOINT") || has(env, "META_API_KEY");
+const verifyReady = (env) => has(env, "MODAL_ASR_ENDPOINT") || has(env, "META_API_KEY");
+const qcVia = (env) => (has(env, "MODAL_DETECT_ENDPOINT") ? ["modal", "detect"] : ["meta", "sam_segment"]);
 
 app.get("/api/health", (c) => {
   const authorized = Boolean(c.get("authorized"));
@@ -335,6 +388,8 @@ app.get("/api/health", (c) => {
       modal_talk: has(c.env, "MODAL_TALK_ENDPOINT"), modal_talk_result: has(c.env, "MODAL_TALK_RESULT_ENDPOINT"),
       modal_h3: false, modal_h3_parked: true,
       modal_stitch: has(c.env, "MODAL_STITCH_ENDPOINT"), modal_stitch_result: has(c.env, "MODAL_STITCH_RESULT_ENDPOINT"),
+      modal_image: has(c.env, "MODAL_IMAGE_ENDPOINT"), modal_detect: has(c.env, "MODAL_DETECT_ENDPOINT"),
+      modal_asr: has(c.env, "MODAL_ASR_ENDPOINT"),
       modal_file: has(c.env, "MODAL_FILE_ENDPOINT"), modal_token: has(c.env, "MODAL_ENDPOINT_TOKEN"),
       r2: Boolean(c.env?.MEDIA), d1: Boolean(c.env?.DB) } });
 });
@@ -349,6 +404,107 @@ app.get("/api/credits", (c) => c.json(creditSummary()));
 // ----------------------------------------------------------- projects ---
 const FIELD_MAX = 2000;
 const str = (v, max = FIELD_MAX) => (v == null ? null : String(v).slice(0, max).trim() || null);
+
+
+app.post("/api/autofill", async (c) => {
+  const body = await readJson(c);
+  if (body === BAD_JSON || !body?.url) return c.json({ error: "Please enter a valid website URL" }, 400);
+  let rawUrl = String(body.url).trim();
+  if (!/^https?:\/\//i.test(rawUrl)) rawUrl = `https://${rawUrl}`;
+  try {
+    new URL(rawUrl);
+  } catch {
+    return c.json({ error: "Invalid website URL format" }, 400);
+  }
+
+  let text = "";
+  if (has(c.env, "FIRECRAWL_API_KEY")) {
+    try {
+      text = await firecrawlScrape(c.env, rawUrl);
+    } catch (e) {
+      console.error("[autofill] firecrawl error:", e?.message || e);
+    }
+  }
+
+  if (!text) {
+    try {
+      const res = await fetch(rawUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        },
+        signal: AbortSignal.timeout(10000)
+      });
+      if (res.ok) {
+        const html = await res.text();
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i) ||
+                          html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+        const cleanText = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+                              .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "")
+                              .replace(/<[^>]+>/g, " ")
+                              .replace(/\s+/g, " ")
+                              .trim()
+                              .slice(0, 3000);
+        text = `Title: ${titleMatch?.[1] || ""}\nDescription: ${descMatch?.[1] || ""}\nBody: ${cleanText}`;
+      }
+    } catch (e) {
+      console.error("[autofill] direct fetch error:", e?.message || e);
+    }
+  }
+
+  if (has(c.env, "BASETEN_API_KEY") && text.trim()) {
+    try {
+      const prompt = `You are a product researcher for a Nigerian video advertising platform. From the website content below, extract:
+1. "name": Product or brand name (clean, 1-4 words)
+2. "description": What it does and its key promise to customers (2-3 punchy, engaging sentences)
+3. "category": 1-3 words (e.g. Business tools, Skincare, Fashion, Hair & Beauty, Food delivery, Logistics, Gadgets)
+4. "audience": Target Nigerian customer persona (e.g. "WhatsApp & Instagram vendors in Lagos", "Lekki & Abuja professionals", "Everyday shoppers in Nigeria")
+
+Return strictly JSON:
+{
+  "name": "...",
+  "description": "...",
+  "category": "...",
+  "audience": "..."
+}
+
+Website content:
+${text.slice(0, 3500)}`;
+
+      const out = await basetenChat(c.env, [{ role: "user", content: prompt }], { json: true });
+      if (out?.name) {
+        return c.json({
+          ok: true,
+          name: String(out.name || "").trim(),
+          description: String(out.description || "").trim(),
+          category: String(out.category || "").trim(),
+          audience: String(out.audience || "").trim()
+        });
+      }
+    } catch (e) {
+      console.error("[autofill] baseten error:", e?.message || e);
+    }
+  }
+
+  try {
+    const domain = new URL(rawUrl).hostname.replace(/^www\./, "").split(".")[0];
+    const capitalized = domain.charAt(0).toUpperCase() + domain.slice(1);
+    const title = (text.match(/Title:\s*([^|\n-]+)/i)?.[1] || capitalized).trim();
+    const desc = (text.match(/Description:\s*([^\n]+)/i)?.[1] || "").trim() ||
+                 `${title} offers quality products and services built for everyday Nigerian customers.`;
+
+    return c.json({
+      ok: true,
+      name: title,
+      description: desc,
+      category: "Business & Commerce",
+      audience: "WhatsApp & Instagram buyers in Lagos"
+    });
+  } catch (err) {
+    return c.json({ error: "Could not parse website details" }, 500);
+  }
+});
 
 app.post("/api/projects", async (c) => {
   const body = await readJson(c);
@@ -370,9 +526,47 @@ app.post("/api/projects", async (c) => {
   return c.json(publicProject(p), 201);
 });
 
+app.get("/api/projects", async (c) => {
+  const list = [];
+  if (c.env?.DB) {
+    try {
+      const { results } = await c.env.DB.prepare(
+        "SELECT id, name, description, category, language, status, format, persona FROM projects ORDER BY rowid DESC LIMIT 40"
+      ).all();
+      if (Array.isArray(results) && results.length > 0) {
+        return c.json({ projects: results });
+      }
+    } catch (e) {
+      console.error("[d1] list projects failed:", e?.message || e);
+    }
+  }
+  for (const [id, p] of mem.projects.entries()) {
+    list.unshift({
+      id: p.id,
+      name: p.name || p.category || "Untitled",
+      description: p.description,
+      category: p.category,
+      language: p.language,
+      status: p.status,
+      format: p.format,
+      persona: p.persona,
+    });
+  }
+  return c.json({ projects: list });
+});
+
 app.get("/api/projects/:pid", async (c) => {
-  const p = await getProject(c.env, c.req.param("pid"));
-  return p ? c.json(publicProject(p)) : c.json({ error: "Project not found" }, 404);
+  const pid = c.req.param("pid");
+  const p = await getProject(c.env, pid);
+  if (!p) return c.json({ error: "Project not found" }, 404);
+  const out = publicProject(p);
+  const lj = await latestJob(c.env, pid);
+  if (lj) {
+    out.latest_job = publicJob(lj);
+  }
+  const lf = await latestFinishedJob(c.env, pid);
+  if (lf) out.latest_film = { id: lf.id, final_media_url: lf.final_media_url, final_video_url: lf.final_video_url || null };
+  return c.json(out);
 });
 
 // A changed scene invalidates the still + QC for that scene only, so a
@@ -495,7 +689,7 @@ async function speakLocal(env, EP, { text, language, persona }) {
     const words = String(text || "").split(/\s+/).filter(Boolean).length;
     const plain = stripDiacritics(text);
     const attempt = async (t) => {
-      const out = await modalCall(env, EP.yarn, { text: t, language, voice: route.voice, gender: persona.gender }, { timeoutMs: VOICE_TIMEOUT_MS });
+      const out = await modalCall(env, EP.yarn, { text: t, language: route.lang || language, voice: route.voice, gender: persona.gender }, { timeoutMs: VOICE_TIMEOUT_MS });
       if (out.error) throw new Error(`voice: ${String(out.error).slice(0, 200)}`);
       return out;
     };
@@ -508,6 +702,11 @@ async function speakLocal(env, EP, { text, language, persona }) {
         out = out2;
         warning = [warning, `Yoruba diacritics broke the first take (${out.duration_s || "?"}s) — retried with plain spelling (${out2.duration_s || "?"}s).`].filter(Boolean).join(" ");
       }
+    }
+    // YarnGPT already re-rolls short takes; one still under ~0.18 s/word is
+    // clipped (some voice+line pairs stop early every time) — say so.
+    if (Number(out.duration_s) < words * 0.18) {
+      warning = [warning, `Voice take looks clipped (${out.duration_s}s for ${words} words) — rephrase this line slightly and re-voice.`].filter(Boolean).join(" ");
     }
     return { ...out, warning };
   }
@@ -526,14 +725,38 @@ function stripDiacritics(s) {
 // scene prompt is never paid for twice). Shared by /keyframes and by the
 // generate step machine, which auto-creates any missing still so a live run
 // can never silently bypass Muse Image.
-async function keyframeForScene(env, p, persona, scene) {
+async function keyframeForScene(env, p, persona, scene, { broll = false } = {}) {
   const look = scene.visual || persona.look_default || persona.look_yoruba || "";
-  const prompt = `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, visible skin pores, natural imperfections, natural light. ${look}. Product: ${p.name} — ${p.description}. Shot: ${scene.shot}. NOT plastic skin, NOT airbrushed, NOT CGI, no beauty filter, vertical 9:16.`;
+  const slot = broll ? BROLL_KEY(scene.n) : scene.n;
+  // Framing: InfiniteTalk ghosts on tight crops; enforce head-and-shoulders with headroom.
+  // Locked persona prompt verbatim + shot suffix per beat (hook vs middle vs cta).
+  const totalScenes = (p.storyboard?.scenes || []).length || 5;
+  const isHook = scene.n === 1 || /hook/i.test(scene.purpose || "");
+  const isCta = (totalScenes && scene.n >= totalScenes) || /cta|call/i.test(scene.purpose || "");
+  const shotSuffix = isHook
+    ? "close-up selfie framing, head and shoulders with room around the head, leaning slightly toward camera, wide-eyed confessional expression, clear space above the head, hands relaxed, no held objects, no text, no phone screens, vertical 9:16."
+    : isCta
+      ? "medium close-up, head and shoulders with room around the head, warm smile, small wave or nod, clear space above the head, hands relaxed, no held objects, no text, no phone screens, vertical 9:16."
+      : "medium shot, head and shoulders with room around the head, both hands visible and gesturing naturally, expressive, clear space above the head, no held objects, no text, no phone screens, vertical 9:16.";
+
+  const prompt = broll
+    ? `Raw candid iPhone photo, product B-roll: close-up of a Nigerian shopkeeper's hand holding a smartphone steadily, thumb tapping the screen, screen is plain solid dark green, shop counter softly blurred behind, handheld phone-camera feel, natural small hand movement, shallow depth of field, NO face, no person looking at camera, no text, no letters, no words, no numbers, no logo, no UI, no QR code, no watermark, NOT CGI, vertical 9:16.`
+    : `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}. ${shotSuffix}`;
   const key = cacheKey("keyframe", prompt);
   const hit = cacheGet(key);
   if (hit) {
-    await charge(env, "meta", "muse_image", p.id, { cached: true });
-    return { frame: await storeKeyframe(env, p, scene.n, hit.url, hit.source), cached: true };
+    const z = hit.source === "z-image" || hit.source === "modal-z-image";
+    await charge(env, z ? "modal" : "meta", z ? "image" : "muse_image", p.id, { cached: true });
+    return { frame: await storeKeyframe(env, p, slot, hit.url, hit.source), cached: true };
+  }
+  // Meta API blocked (2026-11-01, 402 billing): the open model on Modal is
+  // PRIMARY whenever it is configured; Muse Image is used only without it.
+  if (has(env, "MODAL_IMAGE_ENDPOINT")) {
+    assertBudget("modal", "image");
+    const url = await modalImage(env, prompt, { seed: persona.seed });
+    await charge(env, "modal", "image", p.id);
+    cacheSet(key, { url, source: "z-image" });
+    return { frame: await storeKeyframe(env, p, slot, url, "z-image"), cached: false };
   }
   assertBudget("meta", "muse_image");
   let url, source = "muse-image";
@@ -547,13 +770,13 @@ async function keyframeForScene(env, p, persona, scene) {
     await charge(env, "meta", "muse_image", p.id); // the rejected attempt is billed conservatively
     assertBudget("meta", "muse_image");
     url = await museImage(env,
-      `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, smiling and talking to camera in a bright everyday indoor setting, holding a product package, visible skin pores, natural light, vertical 9:16. Product: ${p.name}. NOT plastic skin, NOT airbrushed, NOT CGI.`);
+      `Raw candid iPhone selfie photo of ${persona.keyframe_prompt}, smiling and talking to camera in a bright everyday indoor setting, visible skin pores, natural light, head and shoulders with room around the head, hands relaxed, vertical 9:16. NOT plastic skin, NOT airbrushed, NOT CGI.`);
     source = "fallback";
   }
   await charge(env, "meta", "muse_image", p.id);
   if (!url) throw new Error("Muse Image returned no image");
   cacheSet(key, { url, source });
-  return { frame: await storeKeyframe(env, p, scene.n, url, source), cached: false };
+  return { frame: await storeKeyframe(env, p, slot, url, source), cached: false };
 }
 
 // SAM 3.1 QC (Meta, segmentation — NOT a video generator) for ONE frame:
@@ -569,17 +792,18 @@ async function segmentFrame(env, p, f, { force = false } = {}) {
   if (!url) return { result: null, called: false, error: `scene ${f.scene}: keyframe image not readable — SAM QC skipped` };
   const detections = {}; let called = false, error = null;
   for (const phrase of ["person", "phone"]) {
-    const key = cacheKey("sam", phrase, digest);
+    const key = cacheKey(qcVia(env)[0] === "modal" ? "owl" : "sam", phrase, digest);
     let hit = cacheGet(key);
     if (!hit) {
       try {
-        assertBudget("meta", "sam_segment");
+        const [prov, op] = qcVia(env);
+        assertBudget(prov, op);
         called = true;
-        hit = await samSegment(env, url, phrase);
+        hit = prov === "modal" ? await modalDetect(env, url, phrase) : await samSegment(env, url, phrase);
         cacheSet(key, hit);
-        await charge(env, "meta", "sam_segment", p.id);
+        await charge(env, prov, op, p.id);
       } catch (e) { error = `SAM QC deferred: ${String(e.message).slice(0, 160)}`; hit = { phrase, detections: null, boxes: [] }; }
-    } else { await charge(env, "meta", "sam_segment", p.id, { cached: true }); }
+    } else { const [prov, op] = qcVia(env); await charge(env, prov, op, p.id, { cached: true }); }
     detections[phrase] = hit.detections;
   }
   const result = { scene: f.scene, image_hash: digest, detections,
@@ -598,12 +822,16 @@ function scenePlan(p, sceneLimit) {
     // must not pair scene 3's picture with scene 2's words); index is only
     // the fallback for scripts that omit `scene`.
     const line = lines.find((l) => Number(l.scene) === s.n) || lines[i] || { text: s.key_line, seconds: s.seconds };
-    return { n: s.n, purpose: s.purpose, shot: s.shot, visual: s.visual, key_line: s.key_line, seconds: s.seconds,
-      overlay: s.overlay || null, line: { scene: s.n, text: String(line.text || s.key_line || ""), seconds: Number(line.seconds) || Number(s.seconds) || 6 } };
+    return { n: s.n, broll: s.broll === true, purpose: s.purpose, shot: s.shot, visual: s.visual, key_line: s.key_line, seconds: s.seconds,
+      overlay: s.overlay || null, line: { scene: s.n, text: String(line.text || s.key_line || ""), english: String(line.english || ""), seconds: Number(line.seconds) || Number(s.seconds) || 6 } };
   });
 }
 
 function estimateJobUsd(engine, plan) {
+  if (plan.some((x) => x.engine)) {
+    return +(plan.reduce((t, x) => t + estimateCost("modal", CLIP_OP[x.engine || engine]) + estimateCost("modal", "tts_scene"), 0)
+      + (plan.length ? estimateCost("modal", "stitch") : 0)).toFixed(2);
+  }
   // talk keeps the voice-first order: the clip is driven BY the voice WAV, so
   // its cost is talk_clip + tts_scene per scene (same shape as wan/ltx).
   const clipOp = engine === "ltx" ? "ltx_clip" : engine === "talk" ? "talk_clip" : "wan_clip";
@@ -634,6 +862,7 @@ app.post("/api/projects/:pid/generate", async (c) => {
   const sceneLimit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 0), allScenes.length) : 0;
   const plan = scenePlan(p, sceneLimit);
   if (!plan.length) return c.json({ error: "Storyboard has no scenes" }, 400);
+  sceneEngines(plan, engine).forEach((e, i) => { plan[i].engine = e; });
 
   // Idempotency: one running generate job per project. A second click
   // resumes the existing job instead of paying for a parallel render.
@@ -654,7 +883,7 @@ app.post("/api/projects/:pid/generate", async (c) => {
     status: "running", progress: 1, step: "Queued", mode: live ? "live" : "demo",
     audio_plan: "local-voice", scene_limit: sceneLimit, estimated_usd: estimate,
     scenes: [], models: {}, created_at: new Date().toISOString(),
-    note: live ? "Queued — poll GET /api/jobs/:id every ~5 s; each poll advances one step."
+    note: live ? "Filming advert in portrait 9:16."
       : "Demo mode: Wan/LTX Modal endpoints are not configured. No media credits will be spent on this job.",
     state: { live, phase: live ? "keyframes" : "voice", i: 0, language: p.language, plan,
       work: plan.map(() => ({})), clipPaths: [], audioPaths: [], overlays: [], lines: [],
@@ -683,52 +912,53 @@ async function runStep(env, job, p) {
   const st = job.state, EP = endpoints(env), N = st.plan.length;
   const persona = getPersona(job.persona);
   const label = ENGINE_LABEL[job.engine];
-  // talk renders FROM the voice WAV (audio-driven lips, no separate voice
-  // request at clip time), so its per-scene op is talk_clip; wan/ltx keep
-  // their silent-motion ops. Every op is budget-guarded at spawn (WP-C rule 5).
-  const clipOp = job.engine === "ltx" ? "ltx_clip" : job.engine === "talk" ? "talk_clip" : "wan_clip";
   const s = st.plan[st.i], w = st.work[st.i];
-  const sceneProgress = (frac) => 20 + ((st.i + frac) / Math.max(N, 1)) * 65;
 
   switch (st.phase) {
     case "keyframes": { // 0) Muse Image stills (Meta must be visibly in every live run)
       if (!s) { st.phase = "qc"; st.i = 0; return false; }
-      setStep(job, `Drawing keyframe ${st.i + 1} of ${N} (Muse Image)`, 2 + (st.i / N) * 13);
-      if (frameFor(p, s.n)) { st.kf.reused.push(s.n); st.i++; return false; }
-      if (!has(env, "META_API_KEY")) { st.kf.failed.push(s.n); st.kf.error = "META_API_KEY not set — Muse Image keyframes skipped."; st.i++; return false; }
+      setStep(job, `Drawing keyframe ${st.i + 1} of ${N}`, 2 + (st.i / N) * 13);
+      if (frameForScene(p, st, job, s)) { st.kf.reused.push(s.n); st.i++; return false; }
+      if (!imagesReady(env)) { st.kf.failed.push(s.n); st.kf.error = "No image engine configured (MODAL_IMAGE_ENDPOINT / META_API_KEY) — keyframes skipped."; st.i++; return false; }
       try {
-        const { frame, cached } = await keyframeForScene(env, p, persona, s);
+        const { frame, cached } = await keyframeForScene(env, p, persona, s, { broll: isBroll(job, s) });
         (cached ? st.kf.reused : st.kf.created).push(s.n);
         if (frame.source === "fallback") st.kf.fallback.push(s.n);
         st.i++; return !cached;
       } catch (e) {
         st.kf.failed.push(s.n);
-        st.kf.error = `Muse Image keyframe failed for scene ${s.n} (${String(e.message).slice(0, 120)}) — that scene will be skipped in the film.`;
+        st.kf.error = `Keyframe failed for scene ${s.n} (${String(e.message).slice(0, 120)}) — that scene will be skipped in the film.`;
         st.i++; return !isBudget(e);
       }
     }
     case "qc": { // 0b) SAM 3.1 QC gate (advisory), one frame per step
       if (!s) { st.phase = "voice"; st.i = 0; return false; }
-      setStep(job, `Checking keyframe ${st.i + 1} of ${N} (SAM 3.1 QC)`, 15 + (st.i / N) * 5);
+      setStep(job, `Checking keyframe ${st.i + 1} of ${N} (QC)`, 15 + (st.i / N) * 5);
       const f = frameFor(p, s.n);
       st.i++;
-      if (!f || !has(env, "META_API_KEY")) return false;
+      if (!f || !qcReady(env)) return false;
       const r = await segmentFrame(env, p, f);
       st.qc.checked++; if (r.called) st.qc.called++;
       if (r.error) st.qc.errors.push(r.error);
       return r.called;
     }
-    case "voice": { // 1) local voice FIRST: its real duration sizes the clip
-      if (!s) { st.phase = "stitch_spawn"; return false; }
-      if (!st.live) { st.phase = "critic"; return false; } // demo: no voice, no video
-      setStep(job, `Recording voice for scene ${st.i + 1} of ${N}`, sceneProgress(0));
-      if (st.budgetStop) { w.failed = `skipped — ${st.budgetStop}`; st.phase = "critic"; return false; }
+    case "voice": { // 1) local voice for EVERY scene first: its real duration sizes each clip
+      if (!st.live) { st.phase = "critic"; st.i = 0; return false; } // demo: no voice, no video
+      if (!s) { st.phase = "video_spawn"; st.i = 0; return false; }
+      setStep(job, `Recording voice ${st.i + 1} of ${N}`, 20 + (st.i / N) * 10);
+      if (st.budgetStop) { w.failed = `skipped — ${st.budgetStop}`; st.i++; return false; }
       // No still -> skip BEFORE paying for its voice (audit #9).
-      if (!frameFor(p, s.n)) { w.failed = `no Muse Image keyframe for scene ${s.n} — scene skipped (see keyframe_status)`; st.phase = "critic"; return false; }
+      if (!frameForScene(p, st, job, s)) { w.failed = `no keyframe for scene ${s.n} — scene skipped (see keyframe_status)`; st.i++; return false; }
       st.voiceTried++;
       try {
         assertBudget("modal", "tts_scene");
-        const out = await speakLocal(env, EP, { text: s.line.text, language: st.language, persona });
+        // A dropped connection (fetch failed) is retried: on 2026-11-02 one
+        // network blip left every talk scene without its voice.
+        let out;
+        for (let k = 0; !out; k++) {
+          try { out = await speakLocal(env, EP, { text: s.line.text, language: st.language, persona }); }
+          catch (e) { if (k >= 2 || !/unreachable/i.test(e.message)) throw e; await new Promise((r) => setTimeout(r, 4000 * (k + 1))); }
+        }
         await charge(env, "modal", "tts_scene", job.project_id);
         st.voiceOk++;
         w.audio_volume_path = out.audio_volume_path || volumeBasename(out.audio_url);
@@ -736,22 +966,27 @@ async function runStep(env, job, p) {
         w.voice = { engine: out.engine || "local", voice: out.voice || null, warning: out.warning || null, duration_s: w.duration_s };
       } catch (e) {
         if (e.ambiguous) await charge(env, "modal", "tts_scene", job.project_id); // may have run on the GPU
-        if (isBudget(e)) { st.budgetStop = e.message; w.failed = `skipped — ${e.message}`; st.phase = "critic"; return false; }
+        if (isBudget(e)) { st.budgetStop = e.message; w.failed = `skipped — ${e.message}`; st.i++; return false; }
         // A missing voice degrades to "voice pending" — it must never kill
         // an otherwise-working video job.
         w.voice = { engine: "voice-pending", voice: null, warning: `Local voice unavailable (${String(e.message).slice(0, 120)}) — clip rendered silent for this scene.` };
       }
-      st.phase = "video_spawn";
+      st.i++;
       return true;
     }
-    case "video_spawn": { // 2) one clip spawn — charged AT SPAWN, never lost
-      setStep(job, `Rendering scene ${st.i + 1} of ${N} (${label})`, sceneProgress(0.2));
-      const cap = ENGINE_CAP_S[job.engine];
-      const seconds = +Math.max(2, Math.min(w.duration_s || s.line.seconds || 5, cap)).toFixed(2);
+    case "video_spawn": { // 2) spawn EVERY clip before polling any: the scenes render in parallel
+      if (!s) { st.phase = "video_poll"; st.i = 0; return false; }
+      if (w.failed) { st.i++; return false; }
+      // Idempotency guard (3.4): if this scene already has a call_id or clip, reuse it without spawning again
+      if (w.call_id || w.done) { st.i++; return true; }
+      const eng = s.engine || job.engine, op = CLIP_OP[eng], broll = isBroll(job, s);
+      setStep(job, `Starting scene ${st.i + 1} of ${N} (${ENGINE_LABEL[eng]}${broll ? " B-roll" : ""})`, 30 + (st.i / N) * 5);
+      const seconds = +Math.max(2, Math.min(w.duration_s || s.line.seconds || 5, ENGINE_CAP_S[eng])).toFixed(2);
       w.seconds = seconds;
       try {
-        assertBudget("modal", clipOp);
-        const frame = frameFor(p, s.n);
+        if (st.budgetStop) throw new Error(`skipped — ${st.budgetStop}`);
+        assertBudget("modal", op);
+        const frame = frameForScene(p, st, job, s);
         const dataUrl = await frameDataUrl(env, frame);
         if (!dataUrl) throw new Error(`keyframe for scene ${s.n} is not readable`);
         let out;
@@ -759,59 +994,77 @@ async function runStep(env, job, p) {
           // Talk is audio-driven: keyframe + the voice WAV from the voice
           // phase (already on the volume). It MUST have a voice — a talk
           // clip with no audio is a silent failure, so skip before spending.
-          const spawnEp = job.engine === "talk" ? EP.talk : EP.wan;
-          const payload = job.engine === "talk"
+          const payload = eng === "talk"
             ? (() => { if (!w.audio_volume_path) throw new Error(`scene ${s.n}: talk engine needs its voice WAV first — voice phase produced none`); return { keyframe_b64: dataUrl.split(",").pop(), audio_volume_path: w.audio_volume_path, prompt: `${persona.h3_description}. ${s.visual || ""}.` }; })()
-            : { engine: job.engine, keyframe_b64: dataUrl.split(",").pop(),
-              prompt: `${persona.h3_description}. ${s.visual || ""}. Natural talking-head UGC motion, looking into camera, relaxed gestures, no text, no logo.`,
+            : { engine: eng, keyframe_b64: dataUrl.split(",").pop(),
+              prompt: broll
+                ? `${s.visual || ""}. Product B-roll: ${p.name}. Slow handheld camera drift, hands using the product, no face, no talking, no text, no logo.`
+                : `${persona.h3_description}. ${s.visual || ""}. Natural talking-head UGC motion, looking into camera, relaxed gestures, no text, no logo.`,
               seconds, project: { name: p.name, language: st.language } };
-          out = await modalCall(env, spawnEp, payload, { timeoutMs: 60000 });
-        } catch (e) { if (e.ambiguous) await charge(env, "modal", clipOp, job.project_id); throw e; }
-        await charge(env, "modal", clipOp, job.project_id);
-        if (out.error) throw new Error(`${job.engine} scene ${s.n}: ${String(out.error).slice(0, 160)}`);
-        if (out.call_id) { w.call_id = out.call_id; w.spawned_at = Date.now(); st.phase = "video_poll"; }
-        else { acceptClip(st, s, w, out); st.phase = "critic"; } // sync-style endpoint already returned the clip
+          out = await modalCall(env, eng === "talk" ? EP.talk : EP.wan, payload, { timeoutMs: 60000 });
+        } catch (e) { if (e.ambiguous) await charge(env, "modal", op, job.project_id); throw e; }
+        await charge(env, "modal", op, job.project_id);
+        if (out.error) throw new Error(`${eng} scene ${s.n}: ${String(out.error).slice(0, 160)}`);
+        if (out.call_id) { w.call_id = out.call_id; w.spawned_at = Date.now(); }
+        else { acceptClip(s, w, out); w.done = true; } // sync-style endpoint already returned the clip
       } catch (e) {
         if (isBudget(e)) st.budgetStop = e.message;
         w.failed = String(e.message).slice(0, 200);
-        st.phase = "critic";
+        st.i++;
         return !isBudget(e);
       }
+      st.i++;
       return true;
     }
-    case "video_poll": { // non-blocking single result check
-      const elapsed = Math.round((Date.now() - (w.spawned_at || Date.now())) / 1000);
-      setStep(job, `Rendering scene ${st.i + 1} of ${N} (${label}) — ${elapsed}s`, sceneProgress(0.2 + Math.min(elapsed / 600, 1) * 0.7));
-      // Talk has its own result endpoint; wan/ltx share theirs.
+    case "video_poll": { // one non-blocking result check per still-rendering scene
+      const pending = st.plan.map((x, i) => [x, st.work[i]]).filter(([, y]) => y.call_id && !y.done && !y.failed);
+      if (!pending.length) { st.phase = "critic"; st.i = 0; return false; }
+      const since = Math.min(...pending.map(([, y]) => y.spawned_at || Date.now()));
+      const elapsed = Math.round((Date.now() - since) / 1000);
+      setStep(job, `Rendering ${pending.length} of ${N} scenes in parallel — ${elapsed}s`, 35 + Math.min(elapsed / 600, 1) * 45);
       // WP-H: a missing result endpoint or a poll throw must never kill the
       // job — the scene is marked failed with the reason and the run moves on.
-      let r;
-      try {
-        r = await modalPollOnce(env, job.engine === "talk" ? EP.talkResult : EP.wanResult, w.call_id);
-      } catch (e) { w.failed = `${job.engine} scene ${s.n}: result check failed (${String(e.message).slice(0, 120)})`; st.phase = "critic"; return true; }
-      if (r.status === "complete") {
-        if (r.error) w.failed = `${job.engine} scene ${s.n}: ${String(r.error).slice(0, 160)}`;
-        else acceptClip(st, s, w, r);
-        st.phase = "critic";
-      } else if (r.status === "error") {
-        w.failed = `${job.engine} scene ${s.n}: ${String(r.error || "Modal job failed").slice(0, 160)}`; st.phase = "critic";
-      } else if (Date.now() - w.spawned_at > 25 * 60 * 1000) {
-        // WP-H: the GPU call is abandoned — cancel it so it stops billing,
-        // then record the timeout and move on. The cancel is fire-and-forget.
-        await modalCancel(env, job.engine === "talk" ? EP.talk : EP.wan, w.call_id);
-        w.failed = `${job.engine} scene ${s.n}: timed out after 25 min (call ${w.call_id})`; st.phase = "critic";
+      for (const [x, y] of pending) {
+        const eng = x.engine || job.engine;
+        let r;
+        try { r = await modalPollOnce(env, eng === "talk" ? EP.talkResult : EP.wanResult, y.call_id); }
+        catch (e) { y.failed = `${eng} scene ${x.n}: result check failed (${String(e.message).slice(0, 120)})`; continue; }
+        if (r.status === "complete") {
+          if (r.error) y.failed = `${eng} scene ${x.n}: ${String(r.error).slice(0, 160)}`;
+          else acceptClip(x, y, r);
+          y.done = true;
+        } else if (r.status === "error") {
+          y.failed = `${eng} scene ${x.n}: ${String(r.error || "Modal job failed").slice(0, 160)}`;
+        } else if (Date.now() - y.spawned_at > 25 * 60 * 1000) {
+          // WP-H: the GPU call is abandoned — cancel it so it stops billing.
+          await modalCancel(env, eng === "talk" ? EP.talk : EP.wan, y.call_id);
+          y.failed = `${eng} scene ${x.n}: timed out after 25 min (call ${y.call_id})`;
+        }
       }
       return true;
     }
     case "critic": { // 3) plan/script critic — advisory, can never kill paid clips
-      setStep(job, `Reviewing scene ${st.i + 1} of ${N} (${CRITIC_LABEL})`, sceneProgress(0.95));
+      if (!s) {
+        // Stitch order is the STORYBOARD order, whatever order clips finished in.
+        st.plan.forEach((x, i) => {
+          const y = st.work[i];
+          if (!y.clip_volume_path) return;
+          st.clipPaths.push(y.clip_volume_path);
+          st.audioPaths.push(y.talkAudio ? null : (y.audio_volume_path || null));
+          st.overlays.push(x.overlay || null);
+          st.lines.push(x.line);
+        });
+        st.phase = "stitch_spawn";
+        return false;
+      }
+      setStep(job, `Reviewing scene ${st.i + 1} of ${N} (${CRITIC_LABEL})`, 80 + (st.i / N) * 5);
       let verdict;
       try { verdict = await criticAgent(env, p, s, 1); }
       catch (e) {
         console.error("[critic]", e?.message || e);
         verdict = { mode: "unavailable", label: CRITIC_LABEL, scene: s.n, verdict: "unavailable", note: isBudget(e) ? e.message : "Critic unavailable — clip kept." };
       }
-      job.scenes.push({ scene: s.n, engine: job.engine,
+      job.scenes.push({ scene: s.n, engine: s.engine || job.engine, broll: isBroll(job, s),
         mode: !st.live ? "demo" : w.clip_volume_path ? "live" : "failed",
         clip_url: w.clip_url || null, audio_url: mediaUrl(w.audio_volume_path) || null,
         seconds: w.seconds || null, overlay: s.overlay || null,
@@ -820,13 +1073,12 @@ async function runStep(env, job, p) {
         critic: verdict, error: w.failed || null });
       if (w.failed) (job.failed_scenes = job.failed_scenes || []).push({ scene: s.n, error: w.failed });
       st.i++;
-      st.phase = st.i < N ? "voice" : "stitch_spawn";
       return verdict.mode === "live";
     }
     case "stitch_spawn": {
       if (!st.live || !st.clipPaths.length) { st.phase = "verify"; return false; }
       if (!EP.stitch) { job.stitch_error = "MODAL_STITCH_ENDPOINT not set — clips rendered but not stitched."; st.phase = "verify"; return false; }
-      setStep(job, "Stitching the film (voice + captions + AI label)", 86);
+      setStep(job, "Stitching the film (voice + captions)", 86);
       try {
         assertBudget("modal", "stitch");
         let out;
@@ -844,7 +1096,7 @@ async function runStep(env, job, p) {
       return true;
     }
     case "stitch_poll": {
-      setStep(job, "Stitching the film (voice + captions + AI label)", 90);
+      setStep(job, "Stitching the film (voice + captions)", 90);
       const r = await modalPollOnce(env, EP.stitchResult, st.stitch.call_id);      if (r.status === "complete") { if (r.error) job.stitch_error = String(r.error).slice(0, 200); else acceptFinal(job, r); st.phase = "verify"; }
       else if (r.status === "error") { job.stitch_error = String(r.error || "stitch failed").slice(0, 200); st.phase = "verify"; }
       else if (Date.now() - st.stitch.spawned_at > 12 * 60 * 1000) {
@@ -884,7 +1136,7 @@ async function runStep(env, job, p) {
   }
 }
 
-function acceptClip(st, s, w, out) {
+function acceptClip(s, w, out) {
   // WP-H: accept EITHER clip_volume_path (Modal volume) OR clip_url (https) —
   // never fail a rendered scene on a naming technicality. A scene counts as
   // rendered when the engine gave us anything playable or volume-addressable.
@@ -895,13 +1147,9 @@ function acceptClip(st, s, w, out) {
   w.clip_url = mediaUrl(volumeBasename(name)) || url;
   // Talk clips already carry the voice (muxed at render): stitch must NOT
   // receive the WAV again or the film would double the voice. Silent-engine
-  // clips still need their voice WAV muxed at stitch.
-  const talkAudio = out.has_audio === true || out.engine === "infinitetalk";
-  if (talkAudio) w.voice = { ...(w.voice || {}), engine: "infinitetalk", muxed: true };
-  st.clipPaths.push(name);
-  st.audioPaths.push(talkAudio ? null : (w.audio_volume_path || null));
-  st.overlays.push(s.overlay || null);
-  st.lines.push(s.line);
+  // clips (incl. B-roll) still need their voice WAV muxed at stitch.
+  w.talkAudio = out.has_audio === true || out.engine === "infinitetalk";
+  if (w.talkAudio) w.voice = { ...(w.voice || {}), engine: "infinitetalk", muxed: true };
 }
 function acceptFinal(job, out) {
   job.final_video_url = out.final_video_url || null;
@@ -932,6 +1180,42 @@ function buildModels(job, p) {
   return m;
 }
 
+
+function evaluateQualityGate(st) {
+  const reasons = [];
+  // 1. Caption overlap check
+  for (let i = 1; i < (st.lines || []).length; i++) {
+    const prev = st.lines[i - 1], curr = st.lines[i];
+    if (curr.start != null && prev.end != null && curr.start < prev.end - 0.05) {
+      reasons.push(`Caption overlap detected between scene ${prev.scene} and ${curr.scene}`);
+    }
+  }
+  // 2. B-roll edge artifact guard
+  for (let i = 0; i < (st.plan || []).length; i++) {
+    const s = st.plan[i], w = st.work[i] || {};
+    if (s.engine === "ltx" && w.failed) {
+      reasons.push(`B-roll scene ${s.n} failed generation`);
+    }
+  }
+  // 3. Audio loudness / presence check
+  for (let i = 0; i < (st.plan || []).length; i++) {
+    const w = st.work[i] || {};
+    if (w.voice && w.voice.warning) {
+      reasons.push(`Scene ${st.plan[i].n}: ${w.voice.warning}`);
+    }
+  }
+  // 4. Pacing check: single shot > 4.0s without a cut or overlay
+  for (let i = 0; i < (st.plan || []).length; i++) {
+    const s = st.plan[i], w = st.work[i] || {};
+    const dur = Number(w.duration_s) || Number(s.line?.seconds) || Number(s.seconds) || 5;
+    const hasCutaway = Boolean(s.overlay || s.engine === "ltx");
+    if (!hasCutaway && dur > 4.0) {
+      reasons.push(`Scene ${s.n} exceeds 4.0s continuous talking shot without a cut (${dur.toFixed(1)}s)`);
+    }
+  }
+  return reasons;
+}
+
 function finishJob(job, p, status) {
   const st = job.state, N = st.plan.length, rendered = st.clipPaths.length;
   job.status = status;
@@ -948,6 +1232,19 @@ function finishJob(job, p, status) {
       ? `Partial film: ${rendered}/${N} scenes rendered; scenes ${failed.map((f) => f.scene).join(", ")} failed and were left out rather than killing the whole run.`
       : `${ENGINE_LABEL[job.engine]} picture (silent motion) + local Nigerian voice muxed at stitch — the winning-UGC voiceover format.`;
   job.models = buildModels(job, p);
+  if (status === "complete" && st.live) {
+    const reasons = evaluateQualityGate(st);
+    if (reasons.length > 0) {
+      job.status = "needs_review";
+      job.step = "Needs Review";
+      job.quality_gate = { passed: false, reasons };
+      job.note = `Quality check flagged: ${reasons.join("; ")}`;
+      p.status = "needs_review";
+      return;
+    } else {
+      job.quality_gate = { passed: true, reasons: [] };
+    }
+  }
   p.status = status === "complete" ? "generated" : "generate_error";
 }
 
@@ -999,7 +1296,7 @@ app.get("/api/jobs/:jid", async (c) => {
 // file endpoint. NEVER throws: a verify failure must not fail a completed film.
 async function verifySpoken(env, p, audioRef, expectedText, language) {
   const out = { status: "skipped", expected: expectedText || "", heard: null, similarity: null, words: null, note: null };
-  if (!has(env, "META_API_KEY")) { out.note = "META_API_KEY not set — verify skipped."; return out; }
+  if (!verifyReady(env)) { out.note = "No transcriber configured (MODAL_ASR_ENDPOINT / META_API_KEY) — verify skipped."; return out; }
   if (!audioRef) { out.note = "No local voice track was produced for this job, so transcription verify has nothing to compare against the script."; return out; }
   try {
     let b64 = null;
@@ -1011,9 +1308,10 @@ async function verifySpoken(env, p, audioRef, expectedText, language) {
       b64 = bytesToBase64(new Uint8Array(await res.arrayBuffer()));
     }
     if (!b64) { out.status = "deferred"; out.note = `Voice lives in the Modal volume (${name}) and MODAL_FILE_ENDPOINT is not set — deferred, not faked.`; return out; }
-    assertBudget("meta", "muse_transcribe");
-    const { text, words } = await museTranscribe(env, b64, { language });
-    await charge(env, "meta", "muse_transcribe", p.id);
+    const viaModal = has(env, "MODAL_ASR_ENDPOINT");
+    assertBudget(viaModal ? "modal" : "meta", viaModal ? "asr" : "muse_transcribe");
+    const { text, words } = viaModal ? await modalTranscribe(env, b64, { language }) : await museTranscribe(env, b64, { language });
+    await charge(env, viaModal ? "modal" : "meta", viaModal ? "asr" : "muse_transcribe", p.id);
     out.heard = text; out.words = words;
     // crude word-overlap similarity (cheap honesty signal, not a metric claim)
     const norm = (s) => new Set(String(s || "").toLowerCase().replace(/[^a-z0-9à-ÿ\s]/g, " ").split(/\s+/).filter(Boolean));
@@ -1080,7 +1378,7 @@ app.post("/api/projects/:pid/keyframes", async (c) => {
   const p = await getProject(c.env, c.req.param("pid"));
   if (!p) return c.json({ error: "Project not found" }, 404);
   if (!p.storyboard) return c.json({ error: "Run storyboard first" }, 400);
-  if (!has(c.env, "META_API_KEY")) return c.json({ error: "META_API_KEY not set" }, 400);
+  if (!imagesReady(c.env)) return c.json({ error: "No image engine configured (MODAL_IMAGE_ENDPOINT / META_API_KEY)" }, 400);
   const body = await readJson(c);
   if (body === BAD_JSON) return badJson(c);
   const persona = getPersona(body.persona || p.persona || DEFAULT_PERSONA_ID);
@@ -1159,7 +1457,7 @@ app.post("/api/projects/:pid/qc", async (c) => {
   if (body === BAD_JSON) return badJson(c);
   const out = { checked: 0, results: [], error: null };
   const frames = (p.keyframes || []).filter((f) => !body.scene || f.scene === Number(body.scene));
-  if (!has(c.env, "META_API_KEY")) out.error = "META_API_KEY not set — SAM QC skipped.";
+  if (!qcReady(c.env)) out.error = "No QC detector configured (MODAL_DETECT_ENDPOINT / META_API_KEY) — QC skipped.";
   else for (const f of frames) {
     const r = await segmentFrame(c.env, p, f, { force: !!body.force });
     if (r.result) { out.results.push(r.result); out.checked++; }

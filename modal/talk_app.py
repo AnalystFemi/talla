@@ -126,7 +126,7 @@ def _audio_16k(path: str):
 
 
 @app.cls(image=image, volumes={W: weights, "/outputs": outputs},
-         gpu="H100", timeout=1800, scaledown_window=300, max_containers=1)
+         gpu="H100", timeout=1800, scaledown_window=300, max_containers=6)
 class TalkEngine:
     @modal.enter()
     def load(self):
@@ -195,6 +195,7 @@ class TalkEngine:
             raise RuntimeError(self.load_error)
         import tempfile
         import types
+        import numpy as np
         import soundfile as sf
         import torch
         from PIL import Image, ImageOps
@@ -208,10 +209,22 @@ class TalkEngine:
         key.save(key_path)
 
         speech = _audio_16k(volume_path(payload["audio_volume_path"]))
+        # InfiniteTalk asserts the audio covers every generated frame: the first
+        # window is 81 frames, each later one adds 81 - MOTION_FRAME. A 2.9 s
+        # line (72 frames) failed that assert on the 2026-11-02 demo, so pad
+        # with silence up to a window boundary and cut the video back after.
+        spoken = int(np.ceil(len(speech) / 16000 * FPS))
+        step = 81 - MOTION_FRAME
+        need = 81 + step * int(np.ceil(max(0, spoken - 81) / step)) + 2
+        speech = np.pad(speech, (0, max(0, int(need / FPS * 16000) - len(speech))))
         emb_path, wav_path = f"{work}/1.pt", f"{work}/voice16k.wav"
         torch.save(self._embedding(speech), emb_path)
         sf.write(wav_path, speech, 16000)
 
+        # Steps/seed are overridable: 4-step lightx2v is the fast default; 8 steps
+        # trades ~2x denoise time for fewer ghost/double-face frames.
+        steps = int(payload.get("steps") or STEPS)
+        seed = int(payload.get("seed") if payload.get("seed") is not None else 42)
         prompt = payload.get("prompt") or ("A Nigerian woman talking naturally to camera in a bright "
                                            "Lagos apartment, UGC selfie video, natural gestures.")
         extra = types.SimpleNamespace(use_teacache=False, teacache_thresh=0.2, size="infinitetalk-480",
@@ -220,18 +233,21 @@ class TalkEngine:
             {"prompt": prompt, "cond_video": key_path, "cond_audio": {"person1": emb_path},
              "video_audio": wav_path},
             size_buckget="infinitetalk-480", motion_frame=MOTION_FRAME, frame_num=81, shift=SHIFT,
-            sampling_steps=STEPS, text_guide_scale=TEXT_CFG, audio_guide_scale=AUDIO_CFG,
-            seed=42, offload_model=False, max_frames_num=MAX_FRAMES,
+            sampling_steps=steps, text_guide_scale=TEXT_CFG, audio_guide_scale=AUDIO_CFG,
+            seed=seed, offload_model=False, max_frames_num=MAX_FRAMES,
             color_correction_strength=1.0, extra_args=extra)
 
+        video = video[:, :max(spoken, 2 * FPS)]  # drop the padded silent tail
         name = out_name("talk", "mp4")
-        save_video_ffmpeg(video, f"/outputs/{name[:-4]}", [wav_path], fps=FPS)  # appends .mp4
+        # Mux the ORIGINAL voice (24 kHz YarnGPT / MMS), not the 16 kHz -23 LUFS
+        # copy wav2vec needs — that copy made the finished film sound muffled.
+        save_video_ffmpeg(video, f"/outputs/{name[:-4]}", [volume_path(payload["audio_volume_path"])], fps=FPS)  # appends .mp4
         outputs.commit()  # paid work is safe on the volume before the optional upload
         url = upload_or_volume(f"/outputs/{name}", f"clips/{name}", "video/mp4", name)
         frames = int(video.shape[1])
         return {"clip_url": url, "clip_volume_path": name, "fps": FPS, "num_frames": frames,
                 "duration_s": round(frames / FPS, 3), "has_audio": True,
-                "engine": "infinitetalk", "mode": "live"}
+                "engine": "infinitetalk", "mode": "live", "steps": steps, "seed": seed}
 
 
 @app.function(image=image, timeout=120, secrets=[auth_secret])
